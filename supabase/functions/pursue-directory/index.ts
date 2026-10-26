@@ -248,8 +248,10 @@ Deno.serve(async (request) => {
     }
 
     if (action === "list") {
-      const fullColumns = "id, name, email, phone, grade, roles, photo_path, created_at, teams, emergency_contact_name, emergency_contact_phone, emergency_contact_relationship";
-      const fallbackColumns = "id, name, email, phone, grade, roles, photo_path, created_at";
+      const baseColumns = "id, name, email, phone, grade, roles, photo_path, created_at";
+      const emergencyColumns = `${baseColumns}, emergency_contact_name, emergency_contact_phone, emergency_contact_relationship`;
+      const teamColumns = `${baseColumns}, teams`;
+      const fullColumns = `${baseColumns}, teams, emergency_contact_name, emergency_contact_phone, emergency_contact_relationship`;
 
       let peopleResult = await supabase
         .from("people")
@@ -257,11 +259,27 @@ Deno.serve(async (request) => {
         .order("name", { ascending: true });
 
       if (peopleResult.error && (peopleResult.error.message.includes("does not exist") || peopleResult.error.message.includes("column"))) {
-        console.warn("New columns not yet added to people table, falling back to base columns.");
+        console.warn("Optional people columns are not all available; retrying with emergency-contact columns.");
         peopleResult = await supabase
           .from("people")
-          .select(fallbackColumns)
+          .select(emergencyColumns)
           .order("name", { ascending: true });
+
+        if (peopleResult.error && (peopleResult.error.message.includes("does not exist") || peopleResult.error.message.includes("column"))) {
+          console.warn("Emergency-contact columns are not available; retrying with team columns.");
+          peopleResult = await supabase
+            .from("people")
+            .select(teamColumns)
+            .order("name", { ascending: true });
+        }
+
+        if (peopleResult.error && (peopleResult.error.message.includes("does not exist") || peopleResult.error.message.includes("column"))) {
+          console.warn("Optional people columns are not available; retrying with base columns.");
+          peopleResult = await supabase
+            .from("people")
+            .select(baseColumns)
+            .order("name", { ascending: true });
+        }
       }
 
       if (peopleResult.error) throw peopleResult.error;
