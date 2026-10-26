@@ -1,0 +1,19 @@
+{
+  "name": "Pursue Youth Directory",
+  "short_name": "Pursue",
+  "description": "Pursue youth community directory and member roster.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#f8fafc",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "./icons/pursue-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

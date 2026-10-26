@@ -1,0 +1,2 @@
+[functions.pursue-directory]
+verify_jwt = false

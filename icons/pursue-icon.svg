@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Pursue App Icon</title>
+  <desc id="desc">A stylized P monogram for the Pursue youth directory app.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect x="108" y="104" width="296" height="304" rx="42" fill="rgba(255,255,255,0.12)"/>
+  <path d="M178 170h68c69 0 108 40 108 100 0 62-46 102-116 102h-60V170zm68 55h-20v92h20c36 0 58-18 58-46s-22-46-58-46z" fill="#ffffff"/>
+  <path d="M286 170h54v220h-54z" fill="#ffffff" opacity="0.9"/>
+</svg>
