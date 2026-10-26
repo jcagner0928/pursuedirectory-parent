@@ -1021,6 +1021,38 @@
       text-decoration: underline;
     }
 
+    .emergency-contact-details {
+      display: grid;
+      gap: 3px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border-subtle);
+      color: var(--text-main);
+      font-size: 0.84rem;
+      overflow-wrap: anywhere;
+    }
+
+    .emergency-contact-label {
+      color: #dc2626;
+      font-size: 0.72rem;
+      font-weight: 750;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    [data-theme="dark"] .emergency-contact-label {
+      color: #f87171;
+    }
+
+    .emergency-contact-details a {
+      color: var(--text-muted);
+      text-decoration: none;
+    }
+
+    .emergency-contact-details a:hover {
+      color: var(--accent);
+      text-decoration: underline;
+    }
+
     .copy-button {
       padding: 3px 7px;
       margin-left: auto;
@@ -1115,6 +1147,7 @@
       display: flex;
       flex-direction: column;
       min-width: 180px;
+      flex: 1;
     }
 
     .list-name {
@@ -2988,7 +3021,7 @@
       }
 
       // Emergency Contact in modal
-      if (person.emergency_contact_name || person.emergency_contact_phone) {
+      if (hasEmergencyContact(person)) {
         modalEmergencyWrapper.hidden = false;
         const rel = person.emergency_contact_relationship ? ` (${person.emergency_contact_relationship})` : "";
         modalEmergencyNameRel.textContent = `${person.emergency_contact_name || "Emergency Contact"}${rel}`;
@@ -3126,6 +3159,43 @@
     }
 
     // Render Person in Grid View
+    function hasEmergencyContact(person) {
+      return Boolean(
+        person.emergency_contact_name ||
+        person.emergency_contact_phone ||
+        person.emergency_contact_relationship
+      );
+    }
+
+    function createEmergencyContactDetails(person) {
+      if (!hasEmergencyContact(person)) return null;
+
+      const details = document.createElement("div");
+      details.className = "emergency-contact-details";
+
+      const label = document.createElement("span");
+      label.className = "emergency-contact-label";
+      label.textContent = "Emergency contact";
+      details.appendChild(label);
+
+      const name = document.createElement("span");
+      const relationship = person.emergency_contact_relationship
+        ? ` (${person.emergency_contact_relationship})`
+        : "";
+      name.textContent = `${person.emergency_contact_name || "Contact"}${relationship}`;
+      details.appendChild(name);
+
+      if (person.emergency_contact_phone) {
+        const phone = document.createElement("a");
+        phone.href = `tel:${person.emergency_contact_phone.replace(/[^\d+]/g, "")}`;
+        phone.textContent = person.emergency_contact_phone;
+        phone.addEventListener("click", (event) => event.stopPropagation());
+        details.appendChild(phone);
+      }
+
+      return details;
+    }
+
     function renderGridCard(person, query) {
       const card = document.createElement("article");
       card.className = "card";
@@ -3189,7 +3259,7 @@
       }
 
       // Emergency Contact Indicator
-      if (person.emergency_contact_name || person.emergency_contact_phone) {
+      if (hasEmergencyContact(person)) {
         const emBadge = document.createElement("span");
         emBadge.className = "badge badge-emergency";
         emBadge.title = `Emergency: ${person.emergency_contact_name || ""} (${person.emergency_contact_relationship || "Contact"})`;
@@ -3237,6 +3307,9 @@
         phoneRow.appendChild(copyBtn);
         contact.appendChild(phoneRow);
       }
+
+      const emergencyContact = createEmergencyContactDetails(person);
+      if (emergencyContact) contact.appendChild(emergencyContact);
 
       info.append(title, badges, contact);
 
@@ -3330,7 +3403,7 @@
         }
       }
 
-      if (person.emergency_contact_name || person.emergency_contact_phone) {
+      if (hasEmergencyContact(person)) {
         const emBadge = document.createElement("span");
         emBadge.className = "badge badge-emergency";
         emBadge.title = `Emergency: ${person.emergency_contact_name || ""} (${person.emergency_contact_relationship || "Contact"})`;
@@ -3338,6 +3411,9 @@
         badges.appendChild(emBadge);
       }
       mainInfo.append(name, badges);
+
+      const emergencyContact = createEmergencyContactDetails(person);
+      if (emergencyContact) mainInfo.appendChild(emergencyContact);
 
       const contactCol = document.createElement("div");
       contactCol.className = "list-contact-col";
@@ -3416,7 +3492,8 @@
           const teamsMatch = Array.isArray(person.teams) && person.teams.some((t) => t.toLowerCase().includes(query));
           const emNameMatch = person.emergency_contact_name && person.emergency_contact_name.toLowerCase().includes(query);
           const emPhoneMatch = person.emergency_contact_phone && person.emergency_contact_phone.toLowerCase().includes(query);
-          if (!nameMatch && !emailMatch && !phoneMatch && !gradeMatch && !rolesMatch && !teamsMatch && !emNameMatch && !emPhoneMatch) {
+          const emRelationshipMatch = person.emergency_contact_relationship && person.emergency_contact_relationship.toLowerCase().includes(query);
+          if (!nameMatch && !emailMatch && !phoneMatch && !gradeMatch && !rolesMatch && !teamsMatch && !emNameMatch && !emPhoneMatch && !emRelationshipMatch) {
             return false;
           }
         }
