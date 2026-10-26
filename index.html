@@ -9,7 +9,8 @@
   <meta name="apple-mobile-web-app-title" content="Pursue">
   <title>Pursue | Youth Group Directory</title>
   <link rel="manifest" href="./manifest.webmanifest">
-  <link rel="icon" type="image/svg+xml" href="./icons/pursue-icon.svg">
+  <link rel="icon" type="image/png" href="./icons/pursue-icon.png">
+  <link rel="apple-touch-icon" href="./icons/pursue-icon.png">
   <link rel="preconnect" href="https://bvstmtteutzfwqdiovrm.supabase.co" crossorigin>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -131,13 +132,7 @@
       width: 40px;
       height: 40px;
       border-radius: var(--radius-md);
-      background: linear-gradient(135deg, #6366f1, #a855f7);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: #fff;
-      font-weight: 800;
-      font-size: 1.25rem;
+      object-fit: cover;
       box-shadow: 0 4px 12px var(--accent-glow);
     }
 
@@ -1862,7 +1857,7 @@
     <!-- Header / Navbar -->
     <header class="top-nav">
       <div class="brand-group">
-        <div class="brand-logo" aria-hidden="true">P</div>
+        <img class="brand-logo" src="./icons/pursue-icon.png" alt="">
         <div class="brand-title">
           <span class="brand-name">Pursue</span>
           <span class="brand-tag">Youth Directory</span>

@@ -10,9 +10,9 @@
   "orientation": "portrait-primary",
   "icons": [
     {
-      "src": "./icons/pursue-icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
+      "src": "./icons/pursue-icon.png",
+      "sizes": "768x768",
+      "type": "image/png",
       "purpose": "any maskable"
     }
   ]

@@ -1,9 +1,9 @@
-const CACHE_NAME = 'pursue-directory-v1';
+const CACHE_NAME = 'pursue-directory-v2';
 const APP_SHELL = [
   './',
   './index.html',
   './manifest.webmanifest',
-  './icons/pursue-icon.svg',
+  './icons/pursue-icon.png',
 ];
 
 self.addEventListener('install', (event) => {
