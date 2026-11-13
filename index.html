@@ -2082,7 +2082,7 @@
                     <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"></path>
                   </svg>
                   <div class="dropzone-prompt"><strong>Click to upload</strong> or drag and drop</div>
-                  <div class="dropzone-subtext">JPEG, PNG, WebP or AVIF (up to 20 MB)</div>
+                  <div class="dropzone-subtext">JPEG, PNG, WebP, GIF or AVIF (up to 20 MB; compressed to under 200 KB)</div>
                 </div>
                 <div id="dropzone-preview-view" class="dropzone-preview" hidden>
                   <div class="dropzone-thumb-wrapper">
@@ -2319,6 +2319,7 @@
     const SUPABASE_ANON_KEY = "sb_publishable_NG0wfl0zb4nfZA-rMsTkJQ_EDX5smgk";
     const DIRECTORY_FUNCTION_URL = `${SUPABASE_URL}/functions/v1/pursue-directory`;
     const MAX_PHOTO_SIZE = 20 * 1024 * 1024;
+    const MAX_COMPRESSED_PHOTO_SIZE = 200 * 1024;
     const PHOTO_BUCKET = "pursue-people";
     const ALLOWED_PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"];
     const SESSION_STORAGE_KEY = "pursue_directory_session_v2";
@@ -2684,62 +2685,70 @@
         return { file, originalSize: file?.size || 0, compressedSize: file?.size || 0, savedPercent: 0 };
       }
 
-      // Preserve animated GIFs
       if (file.type === "image/gif") {
+        if (file.size < MAX_COMPRESSED_PHOTO_SIZE) {
+          return { file, originalSize: file.size, compressedSize: file.size, savedPercent: 0 };
+        }
+        throw new Error("Animated GIFs larger than 200 KB can't be compressed without losing animation. Choose a still image.");
+      }
+
+      if (file.size < MAX_COMPRESSED_PHOTO_SIZE) {
         return { file, originalSize: file.size, compressedSize: file.size, savedPercent: 0 };
       }
 
-      return new Promise((resolve) => {
+      const img = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = (e) => {
-          const img = new Image();
-          img.onload = () => {
-            let width = img.naturalWidth || img.width;
-            let height = img.naturalHeight || img.height;
-
-            if (width > maxWidth || height > maxHeight) {
-              if (width > height) {
-                height = Math.round((height * maxWidth) / width);
-                width = maxWidth;
-              } else {
-                width = Math.round((width * maxHeight) / height);
-                height = maxHeight;
-              }
-            }
-
-            const canvas = document.createElement("canvas");
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext("2d");
-            ctx.imageSmoothingEnabled = true;
-            ctx.imageSmoothingQuality = "high";
-            ctx.drawImage(img, 0, 0, width, height);
-
-            const outputMime = "image/webp";
-            canvas.toBlob((blob) => {
-              if (!blob || blob.size >= file.size) {
-                resolve({ file, originalSize: file.size, compressedSize: file.size, savedPercent: 0 });
-                return;
-              }
-
-              const newFileName = file.name.replace(/\.[^.]+$/, ".webp");
-              const compressedFile = new File([blob], newFileName, { type: outputMime, lastModified: Date.now() });
-              const savedPercent = Math.max(0, Math.round(((file.size - blob.size) / file.size) * 100));
-
-              resolve({
-                file: compressedFile,
-                originalSize: file.size,
-                compressedSize: blob.size,
-                savedPercent,
-              });
-            }, outputMime, quality);
-          };
-          img.onerror = () => resolve({ file, originalSize: file.size, compressedSize: file.size, savedPercent: 0 });
-          img.src = e.target.result;
+          const image = new Image();
+          image.onload = () => resolve(image);
+          image.onerror = () => reject(new Error("The selected image could not be decoded."));
+          image.src = e.target.result;
         };
-        reader.onerror = () => resolve({ file, originalSize: file.size, compressedSize: file.size, savedPercent: 0 });
+        reader.onerror = () => reject(new Error("The selected image could not be read."));
         reader.readAsDataURL(file);
       });
+
+      let width = img.naturalWidth || img.width;
+      let height = img.naturalHeight || img.height;
+      if (width > maxWidth || height > maxHeight) {
+        const scale = Math.min(maxWidth / width, maxHeight / height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Your browser couldn't prepare the image for compression.");
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      const outputMime = "image/webp";
+      const qualities = [...new Set([quality, 0.7, 0.58, 0.46, 0.34, 0.22, 0.12])].sort((a, b) => b - a);
+
+      while (Math.max(width, height) >= 64) {
+        canvas.width = width;
+        canvas.height = height;
+        ctx.drawImage(img, 0, 0, width, height);
+
+        for (const outputQuality of qualities) {
+          const blob = await new Promise((resolve, reject) => {
+            canvas.toBlob((result) => {
+              if (result) resolve(result);
+              else reject(new Error("Your browser couldn't compress this image."));
+            }, outputMime, outputQuality);
+          });
+          if (blob.size < MAX_COMPRESSED_PHOTO_SIZE) {
+            const newFileName = file.name.replace(/\.[^.]+$/, ".webp");
+            const compressedFile = new File([blob], newFileName, { type: outputMime, lastModified: Date.now() });
+            const savedPercent = Math.max(0, Math.round(((file.size - blob.size) / file.size) * 100));
+            return { file: compressedFile, originalSize: file.size, compressedSize: blob.size, savedPercent };
+          }
+        }
+
+        width = Math.round(width * 0.8);
+        height = Math.round(height * 0.8);
+      }
+
+      throw new Error("This image couldn't be compressed to under 200 KB. Try a different image.");
     }
 
     // Teams & Small Groups Helpers
@@ -3827,7 +3836,19 @@
       }
 
       photoStatusHint.textContent = "Auto-optimizing photo...";
-      const { file: optimizedFile, originalSize, compressedSize, savedPercent } = await compressImageFile(file);
+      let optimizedFile;
+      let originalSize;
+      let compressedSize;
+      let savedPercent;
+      try {
+        ({ file: optimizedFile, originalSize, compressedSize, savedPercent } = await compressImageFile(file));
+      } catch (error) {
+        photoInput.value = "";
+        optimizedPhotoFile = null;
+        photoStatusHint.textContent = "Choose a photo under 200 KB or another image to compress.";
+        showToast(error.message, "error");
+        return;
+      }
       optimizedPhotoFile = optimizedFile;
 
       const objectUrl = URL.createObjectURL(optimizedFile);

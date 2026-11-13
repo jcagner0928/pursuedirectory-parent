@@ -1,4 +1,4 @@
-const CACHE_NAME = 'pursue-directory-v2';
+const CACHE_NAME = 'pursue-directory-v3';
 const APP_SHELL = [
   './',
   './index.html',

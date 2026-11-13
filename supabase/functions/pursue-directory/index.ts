@@ -19,7 +19,7 @@ function getCorsHeaders(requestOrigin: string | null) {
 }
 
 const bucket = "pursue-people";
-const maxPhotoSize = 20 * 1024 * 1024;
+const maxCompressedPhotoSize = 200 * 1024;
 const maxRequestSize = 64 * 1024;
 const allowedPhotoTypes = new Set([
   "image/jpeg",
@@ -169,8 +169,8 @@ Deno.serve(async (request) => {
       if (typeof photoType !== "string" || !allowedPhotoTypes.has(photoType)) {
         return jsonResponse({ error: "Choose a JPEG, PNG, WebP, GIF, or AVIF image." }, 400, requestOrigin);
       }
-      if (typeof photoSize !== "number" || !Number.isSafeInteger(photoSize) || photoSize < 1 || photoSize > maxPhotoSize) {
-        return jsonResponse({ error: "Choose an image no larger than 20 MB." }, 400, requestOrigin);
+      if (typeof photoSize !== "number" || !Number.isSafeInteger(photoSize) || photoSize < 1 || photoSize >= maxCompressedPhotoSize) {
+        return jsonResponse({ error: "The compressed picture must be smaller than 200 KB." }, 400, requestOrigin);
       }
 
       const extensionByType: Record<string, string> = {
@@ -397,7 +397,7 @@ Deno.serve(async (request) => {
         if (!uploadedPhoto
           || !Number.isSafeInteger(uploadedSize)
           || uploadedSize < 1
-          || uploadedSize > maxPhotoSize
+          || uploadedSize >= maxCompressedPhotoSize
           || typeof uploadedType !== "string"
           || !allowedPhotoTypes.has(uploadedType)) {
           return jsonResponse({ error: "The uploaded picture is missing or invalid; please try again." }, 400, requestOrigin);
@@ -532,7 +532,7 @@ Deno.serve(async (request) => {
         if (!uploadedPhoto
           || !Number.isSafeInteger(uploadedSize)
           || uploadedSize < 1
-          || uploadedSize > maxPhotoSize
+          || uploadedSize >= maxCompressedPhotoSize
           || typeof uploadedType !== "string"
           || !allowedPhotoTypes.has(uploadedType)) {
           return jsonResponse({ error: "The uploaded picture is missing or invalid; please try again." }, 400, requestOrigin);
