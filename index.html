@@ -623,6 +623,30 @@
       border-top: 1px solid var(--border);
     }
 
+    .import-roster-tools {
+      display: grid;
+      gap: 12px;
+      margin: 0 0 22px;
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      background: var(--bg-subtle);
+    }
+
+    .import-roster-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .import-roster-status {
+      margin: 0;
+      color: var(--text-muted);
+      font-size: 0.86rem;
+      white-space: pre-line;
+    }
+
     .hint {
       margin: 0;
       color: var(--text-muted);
@@ -1952,6 +1976,18 @@
           <h2 id="person-form-heading">Add someone to the directory</h2>
           <button class="secondary-button" id="back-to-directory-button" type="button">Done editing</button>
         </div>
+        <section class="import-roster-tools" aria-labelledby="import-roster-heading">
+          <div>
+            <h3 id="import-roster-heading" style="margin: 0 0 4px;">Import a roster</h3>
+            <p class="hint">Add rows from Google Sheets or another spreadsheet app. Imports add people; they never replace the current directory.</p>
+          </div>
+          <div class="import-roster-actions">
+            <input id="roster-file-input" type="file" accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values" hidden>
+            <button class="secondary-button" id="roster-file-button" type="button">Choose CSV/TSV file</button>
+            <span class="hint">In Google Sheets, choose File → Download → Comma-separated values (.csv), then select that file here. No need to share the sheet publicly.</span>
+          </div>
+          <p id="roster-import-status" class="import-roster-status" aria-live="polite"></p>
+        </section>
         <form id="person-form">
           <div class="form-grid">
             <div class="field">
@@ -2436,6 +2472,9 @@
     const viewListBtn = document.querySelector("#view-list-btn");
     const printButton = document.querySelector("#print-button");
     const exportCsvBtn = document.querySelector("#export-csv-btn");
+    const rosterFileInput = document.querySelector("#roster-file-input");
+    const rosterFileButton = document.querySelector("#roster-file-button");
+    const rosterImportStatus = document.querySelector("#roster-import-status");
 
     // Teams & Emergency Contact Form Elements
     const teamCheckboxesContainer = document.querySelector("#team-checkboxes-container");
@@ -2858,6 +2897,239 @@
 
     exportCsvBtn.addEventListener("click", exportDirectoryCSV);
     printButton.addEventListener("click", () => window.print());
+
+    function parseRosterDelimitedText(text) {
+      const delimiter = text.split(/\r?\n/, 1)[0].includes("\t") ? "\t" : ",";
+      const rows = [];
+      let row = [];
+      let cell = "";
+      let quoted = false;
+      let quoteClosed = false;
+
+      for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+        if (quoted) {
+          if (char === '"' && text[i + 1] === '"') {
+            cell += '"';
+            i += 1;
+          } else if (char === '"') {
+            quoted = false;
+            quoteClosed = true;
+          } else {
+            cell += char;
+          }
+          continue;
+        }
+
+        if (char === '"' && cell.length === 0 && !quoteClosed) {
+          quoted = true;
+        } else if (char === delimiter) {
+          row.push(cell.trim());
+          cell = "";
+          quoteClosed = false;
+        } else if (char === "\n" || char === "\r") {
+          if (char === "\r" && text[i + 1] === "\n") i += 1;
+          row.push(cell.trim());
+          if (row.some((value) => value !== "")) rows.push(row);
+          row = [];
+          cell = "";
+          quoteClosed = false;
+        } else if (quoteClosed && char.trim() !== "") {
+          throw new Error("The file contains unexpected text after a quoted value.");
+        } else if (!quoteClosed) {
+          cell += char;
+        }
+      }
+
+      if (quoted) throw new Error("The file has an unclosed quoted value.");
+      row.push(cell.trim());
+      if (row.some((value) => value !== "")) rows.push(row);
+      if (rows.length < 2) throw new Error("The sheet must include a header row and at least one member.");
+      return rows;
+    }
+
+    function normalizeRosterHeader(value) {
+      return value.replace(/^\uFEFF/, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    }
+
+    function parseRosterRows(text) {
+      const rows = parseRosterDelimitedText(text);
+      const headers = rows[0].map(normalizeRosterHeader);
+      const findColumn = (...names) => headers.findIndex((header) => names.includes(header));
+      const columns = {
+        name: findColumn("name", "fullname", "membername", "studentname"),
+        firstName: findColumn("firstname", "first"),
+        lastName: findColumn("lastname", "last"),
+        grade: findColumn("grade", "gradeoragegroup", "schoolgrade", "year"),
+        roles: findColumn("roles", "role", "adultroles"),
+        teams: findColumn("teams", "team", "smallgroups", "smallgroup"),
+        email: findColumn("email", "emailaddress"),
+        phone: findColumn("phone", "phonenumber", "mobile", "cell"),
+        emergencyName: findColumn("emergencycontact", "emergencycontactname", "guardian", "guardianname"),
+        emergencyPhone: findColumn("emergencyphone", "emergencycontactphone", "guardianphone"),
+        emergencyRelationship: findColumn("emergencyrelationship", "emergencycontactrelationship", "guardianrelationship"),
+      };
+
+      if (columns.name < 0 && (columns.firstName < 0 || columns.lastName < 0)) {
+        throw new Error("Add a Name column, or both First Name and Last Name columns.");
+      }
+      if (columns.grade < 0) throw new Error("A Grade column is required.");
+
+      const getCell = (cells, column) => column < 0 ? "" : (cells[column] || "").trim();
+      const splitList = (value) => value.split(/[,;|]/).map((item) => item.trim()).filter(Boolean);
+      const gradeMap = {
+        "7": "7th grade",
+        "7th": "7th grade",
+        "7thgrade": "7th grade",
+        "8": "8th grade",
+        "8th": "8th grade",
+        "grade8": "8th grade",
+        "8thgrade": "8th grade",
+        "9": "Freshman",
+        "9th": "Freshman",
+        "grade9": "Freshman",
+        freshman: "Freshman",
+        freshman9th: "Freshman",
+        "10": "Sophomore",
+        "10th": "Sophomore",
+        "grade10": "Sophomore",
+        sophomore: "Sophomore",
+        sophomore10th: "Sophomore",
+        "11": "Junior",
+        "11th": "Junior",
+        "grade11": "Junior",
+        junior: "Junior",
+        junior11th: "Junior",
+        "12": "Senior",
+        "12th": "Senior",
+        "grade12": "Senior",
+        senior: "Senior",
+        senior12th: "Senior",
+        adult: "Adult",
+        leader: "Adult",
+        "adultleader": "Adult",
+        other: "Other",
+      };
+      const validRoles = new Set(["Teacher", "Parent", "Volunteer"]);
+      const allowedGrades = new Set(["7th grade", "8th grade", "Freshman", "Sophomore", "Junior", "Senior", "Adult", "Other"]);
+      const validPeople = [];
+      const rowErrors = [];
+
+      for (let i = 1; i < rows.length; i += 1) {
+        const cells = rows[i];
+        const rawName = getCell(cells, columns.name) ||
+          [getCell(cells, columns.firstName), getCell(cells, columns.lastName)].filter(Boolean).join(" ");
+        const rawGrade = getCell(cells, columns.grade);
+        const grade = gradeMap[normalizeRosterHeader(rawGrade)] || rawGrade;
+        const email = getCell(cells, columns.email);
+        const phone = getCell(cells, columns.phone);
+        const teams = splitList(getCell(cells, columns.teams));
+        const emergencyName = getCell(cells, columns.emergencyName);
+        const emergencyPhone = getCell(cells, columns.emergencyPhone);
+        const emergencyRelationship = getCell(cells, columns.emergencyRelationship);
+        const roles = [...new Set(splitList(getCell(cells, columns.roles))
+          .map((role) => [...validRoles].find((validRole) => validRole.toLowerCase() === role.toLowerCase()))
+          .filter(Boolean))];
+        const errors = [];
+
+        if (!rawName || rawName.length > 200) errors.push("name is missing or too long");
+        if (!allowedGrades.has(grade)) errors.push("grade is missing or unrecognized");
+        if (!email && !phone) errors.push("email or phone is required");
+        if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errors.push("email is invalid");
+        if (email.length > 320 || phone.length > 50) errors.push("contact details are too long");
+        if (grade === "Adult" && roles.length === 0) errors.push("Adults need a Teacher, Parent, or Volunteer role");
+        if (teams.some((team) => team.length > 60)) errors.push("team names must be 60 characters or less");
+        if (emergencyName.length > 200 || emergencyPhone.length > 50 || emergencyRelationship.length > 100) {
+          errors.push("emergency contact details are too long");
+        }
+
+        if (errors.length) {
+          rowErrors.push(`Row ${i + 1}${rawName ? ` (${rawName})` : ""}: ${errors.join(", ")}.`);
+          continue;
+        }
+
+        validPeople.push({
+          name: rawName,
+          grade,
+          roles: grade === "Adult" ? roles : [],
+          teams: [...new Set(teams)],
+          email,
+          phone,
+          emergency_contact_name: emergencyName,
+          emergency_contact_phone: emergencyPhone,
+          emergency_contact_relationship: emergencyRelationship,
+        });
+      }
+
+      if (rows.length - 1 > 100) {
+        throw new Error("Imports are limited to 100 members at a time. Split the sheet into smaller files.");
+      }
+      if (!validPeople.length) {
+        throw new Error(`No valid member rows found.${rowErrors.length ? ` ${rowErrors.slice(0, 3).join(" ")}` : ""}`);
+      }
+      return { people: validPeople, rowErrors };
+    }
+
+    async function importRosterText(text, sourceName) {
+      try {
+        if (text.length > 2 * 1024 * 1024) {
+          throw new Error("The file is larger than the 2 MB import limit.");
+        }
+        const { people, rowErrors } = parseRosterRows(text);
+        const skipped = rowErrors.length;
+        const confirmation = `Add ${people.length} member${people.length === 1 ? "" : "s"} from ${sourceName}?` +
+          (skipped ? `\n\n${skipped} invalid row${skipped === 1 ? " will" : "s will"} be skipped.` : "");
+        if (!window.confirm(confirmation)) return;
+
+        rosterFileButton.disabled = true;
+        rosterImportStatus.textContent = `Importing ${people.length} members...`;
+        let imported = 0;
+        const failures = [];
+
+        for (const person of people) {
+          try {
+            await callDirectory("add", {
+              editorPassword: activeEditorPassword,
+              fields: person,
+            });
+            imported += 1;
+          } catch (error) {
+            failures.push(`${person.name}: ${error.message}`);
+          }
+        }
+
+        await loadPeople();
+        const summary = `Imported ${imported} of ${people.length} members.` +
+          (skipped ? ` Skipped ${skipped} invalid row${skipped === 1 ? "" : "s"}.` : "") +
+          (failures.length ? `\nCould not import ${failures.length}: ${failures.slice(0, 3).join("; ")}` : "") +
+          (rowErrors.length ? `\n${rowErrors.slice(0, 3).join("\n")}` : "");
+        rosterImportStatus.textContent = summary;
+        if (imported === people.length && !skipped) {
+          showToast(`Imported ${imported} members from ${sourceName}.`, "success");
+        } else {
+          showToast(summary, failures.length || imported === 0 ? "error" : "info");
+        }
+      } catch (error) {
+        rosterImportStatus.textContent = error.message;
+        showToast(`Could not import roster: ${error.message}`, "error");
+      } finally {
+        rosterFileButton.disabled = false;
+      }
+    }
+
+    rosterFileButton.addEventListener("click", () => rosterFileInput.click());
+    rosterFileInput.addEventListener("change", async () => {
+      const file = rosterFileInput.files[0];
+      if (!file) return;
+      try {
+        await importRosterText(await file.text(), file.name);
+      } catch (error) {
+        rosterImportStatus.textContent = error.message;
+        showToast(`Could not read roster file: ${error.message}`, "error");
+      } finally {
+        rosterFileInput.value = "";
+      }
+    });
 
     // Highlight search match in text safely
     function highlightQuery(text, query) {
