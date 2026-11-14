@@ -1,7 +1,11 @@
 // Configuration
     const SUPABASE_URL = "https://bvstmtteutzfwqdiovrm.supabase.co";
     const SUPABASE_ANON_KEY = "sb_publishable_NG0wfl0zb4nfZA-rMsTkJQ_EDX5smgk";
-    const DIRECTORY_FUNCTION_URL = `${SUPABASE_URL}/functions/v1/pursue-directory`;
+    // When running the local dev server (port 3000), route via local proxy to prevent CORS blocking
+    const isLocalDevServer = (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") && window.location.port === "3000";
+    const DIRECTORY_FUNCTION_URL = isLocalDevServer
+      ? "/functions/v1/pursue-directory"
+      : `${SUPABASE_URL}/functions/v1/pursue-directory`;
     const MAX_PHOTO_SIZE = 20 * 1024 * 1024;
     const MAX_COMPRESSED_PHOTO_SIZE = 200 * 1024;
     const PHOTO_BUCKET = "pursue-people";
