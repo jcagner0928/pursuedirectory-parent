@@ -10,8 +10,8 @@
     const MAX_COMPRESSED_PHOTO_SIZE = 200 * 1024;
     const PHOTO_BUCKET = "pursue-people";
     const ALLOWED_PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"];
-    const SESSION_STORAGE_KEY = "pursue_directory_session_v2";
-    const LOCAL_DEVICE_KEY = "pursue_directory_remembered_v3";
+    const SESSION_STORAGE_KEY = "pursue_directory_session_v3";
+    const LOCAL_DEVICE_KEY = "pursue_directory_remembered_v4";
     const CACHED_DATA_KEY = "pursue_directory_cached_data_v2";
     const THEME_STORAGE_KEY = "pursue_directory_theme";
 
@@ -136,6 +136,11 @@
     const signInForm = document.querySelector("#sign-in-form");
     const signInButton = document.querySelector("#sign-in-button");
     const rememberDeviceCheckbox = document.querySelector("#remember-device-checkbox");
+    const passkeyEnrollmentPanel = document.querySelector("#passkey-enrollment-panel");
+    const registerPasskeyButton = document.querySelector("#register-passkey-button");
+    const inviteMemberForm = document.querySelector("#invite-member-form");
+    const inviteMemberButton = document.querySelector("#invite-member-button");
+    const inviteMemberStatus = document.querySelector("#invite-member-status");
     const editPasswordForm = document.querySelector("#edit-password-form");
     const editUnlockButton = document.querySelector("#edit-unlock-button");
     const editorPasswordInput = document.querySelector("#edit-password");
@@ -147,6 +152,7 @@
     const editScreen = document.querySelector("#edit-screen");
     const directorySection = document.querySelector("#directory-section");
     const accountRow = document.querySelector("#account-row");
+    const signedInEmail = document.querySelector("#signed-in-email");
     const editorActiveBadge = document.querySelector("#editor-active-badge");
     const editButton = document.querySelector("#edit-button");
     const cancelEditButton = document.querySelector("#cancel-edit-button");
@@ -220,6 +226,8 @@
     let activeView = "grid"; // "grid" | "list"
     let searchQuery = "";
     let activePassword = "";
+    let activeEmail = "";
+    let activeSessionToken = "";
     let activeEditorPassword = "";
     let isEditing = false;
     let editUnlocked = false;
@@ -256,19 +264,26 @@
     }
 
     // Session Management & Device Persistence
-    async function saveSession(password, editorPassword) {
+    async function saveSession(email, password, sessionToken, editorPassword) {
       // 1. Save in sessionStorage (current browser session / tab)
-      const sessionData = JSON.stringify({ password, editorPassword: editorPassword || "" });
+      const sessionData = JSON.stringify({
+        email,
+        password,
+        sessionToken,
+        editorPassword: editorPassword || "",
+      });
       try { sessionStorage.setItem(SESSION_STORAGE_KEY, sessionData); } catch (e) {}
 
       // 2. If user checked "Remember sign-in on this device", persist securely in localStorage
       if (rememberDeviceCheckbox.checked) {
         try {
           localStorage.setItem(LOCAL_DEVICE_KEY, JSON.stringify({
+            email,
             password,
+            sessionToken,
             editorPassword: editorPassword || "",
             savedAt: new Date().toISOString(),
-            _v: 3,
+            _v: 4,
           }));
         } catch (e) {}
       } else {
@@ -282,7 +297,11 @@
         const sessionRaw = sessionStorage.getItem(SESSION_STORAGE_KEY);
         if (sessionRaw) {
           const parsed = JSON.parse(sessionRaw);
-          if (parsed && typeof parsed.password === "string") return { ...parsed, _source: "session" };
+          if (parsed && typeof parsed.email === "string"
+            && typeof parsed.password === "string"
+            && typeof parsed.sessionToken === "string") {
+            return { ...parsed, _source: "session" };
+          }
         }
       } catch (e) {}
 
@@ -291,7 +310,11 @@
         const deviceRaw = localStorage.getItem(LOCAL_DEVICE_KEY);
         if (deviceRaw) {
           const parsed = JSON.parse(deviceRaw);
-          if (parsed && typeof parsed.password === "string") return { ...parsed, _source: "local" };
+          if (parsed && typeof parsed.email === "string"
+            && typeof parsed.password === "string"
+            && typeof parsed.sessionToken === "string") {
+            return { ...parsed, _source: "local" };
+          }
         }
       } catch (e) {}
 
@@ -311,7 +334,10 @@
         const raw = localStorage.getItem(LOCAL_DEVICE_KEY);
         if (!raw) return false;
         const parsed = JSON.parse(raw);
-        return Boolean(parsed && typeof parsed.password === "string");
+        return Boolean(parsed
+          && typeof parsed.email === "string"
+          && typeof parsed.password === "string"
+          && typeof parsed.sessionToken === "string");
       } catch (e) { return false; }
     }
 
@@ -341,6 +367,7 @@
       editScreen.hidden = !isSignedIn || !isEditing;
       directorySection.hidden = !isSignedIn || (isEditing && !editUnlocked);
       accountRow.hidden = !isSignedIn;
+      signedInEmail.textContent = isSignedIn ? activeEmail : "";
       printButton.hidden = !isSignedIn;
       exportCsvBtn.hidden = !isSignedIn;
       editorActiveBadge.hidden = !editUnlocked;
@@ -1601,15 +1628,23 @@
     });
 
     // Edge Function API Call
-    async function callDirectory(action, { password = activePassword, editorPassword, fields = {} } = {}) {
+    async function callDirectory(action, {
+      password = activePassword,
+      editorPassword,
+      sessionToken = activeSessionToken,
+      accessToken,
+      fields = {},
+    } = {}) {
       const headers = {
         apikey: SUPABASE_ANON_KEY,
         Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
         "Content-Type": "application/json"
       };
+      if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
       const body = JSON.stringify({
         action,
         password,
+        session_token: sessionToken,
         ...(editorPassword ? { editor_password: editorPassword } : {}),
         ...fields,
       });
@@ -1799,21 +1834,109 @@
     }
 
     // Auth & Form Handlers
+    async function registerPasskey(accessToken) {
+      if (!window.SimpleWebAuthnBrowser
+        || typeof window.SimpleWebAuthnBrowser.startRegistration !== "function") {
+        throw new Error("Passkeys are not supported by this browser.");
+      }
+
+      const { options, challenge_id: challengeId } = await callDirectory("passkey-registration-options", {
+        password: "",
+        sessionToken: "",
+        accessToken,
+      });
+      const credential = await window.SimpleWebAuthnBrowser.startRegistration({ optionsJSON: options });
+      await callDirectory("passkey-registration-verify", {
+        password: "",
+        sessionToken: "",
+        accessToken,
+        fields: { challenge_id: challengeId, credential },
+      });
+      passkeyEnrollmentPanel.hidden = true;
+      const { error } = await storageClient.auth.signOut();
+      if (error) {
+        console.warn("Passkey was registered, but the invitation session could not be cleared:", error);
+        showToast("Passkey registered. Close this tab to finish signing out of the invitation.", "info");
+      } else {
+        showToast("Passkey registered. You can now sign in with your email and directory password.", "success");
+      }
+    }
+
+    registerPasskeyButton.addEventListener("click", async () => {
+      registerPasskeyButton.disabled = true;
+      try {
+        if (!storageClient) throw new Error("The sign-in service is unavailable.");
+        const { data, error } = await storageClient.auth.getSession();
+        if (error) throw error;
+        if (!data.session) throw new Error("Open the invitation email link again to register your passkey.");
+        await registerPasskey(data.session.access_token);
+      } catch (err) {
+        showToast(`Passkey setup failed: ${err.message}`, "error");
+      } finally {
+        registerPasskeyButton.disabled = false;
+      }
+    });
+
+    inviteMemberForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      inviteMemberButton.disabled = true;
+      inviteMemberStatus.textContent = "";
+      try {
+        const formData = new FormData(inviteMemberForm);
+        const email = String(formData.get("email") || "").trim().toLowerCase();
+        await callDirectory("invite-member", {
+          editorPassword: activeEditorPassword,
+          fields: { email },
+        });
+        inviteMemberStatus.textContent = `Invitation sent to ${email}.`;
+        inviteMemberForm.reset();
+      } catch (err) {
+        inviteMemberStatus.textContent = `Invitation failed: ${err.message}`;
+      } finally {
+        inviteMemberButton.disabled = false;
+      }
+    });
+
     signInForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       signInButton.disabled = true;
       try {
         const data = new FormData(signInForm);
-        const password = data.get("password");
-        await callDirectory("verify", { password });
+        const email = String(data.get("email") || "").trim().toLowerCase();
+        const password = String(data.get("password") || "");
+        if (!window.SimpleWebAuthnBrowser
+          || typeof window.SimpleWebAuthnBrowser.startAuthentication !== "function") {
+          throw new Error("Passkeys are not supported by this browser.");
+        }
+
+        const { options, challenge_id: challengeId } = await callDirectory("passkey-auth-options", {
+          password,
+          sessionToken: "",
+          fields: { email },
+        });
+        const credential = await window.SimpleWebAuthnBrowser.startAuthentication({ optionsJSON: options });
+        const { session_token: sessionToken } = await callDirectory("passkey-auth-verify", {
+          password,
+          sessionToken: "",
+          fields: {
+            email,
+            challenge_id: challengeId,
+            credential,
+            remember: rememberDeviceCheckbox.checked,
+          },
+        });
+        activeEmail = email;
         activePassword = password;
-        await saveSession(activePassword, "");
+        activeSessionToken = sessionToken;
+        await saveSession(activeEmail, activePassword, activeSessionToken, "");
         signInForm.reset();
         setSignedInState(true);
         showToast("Welcome to the Pursue directory!", "success");
         await loadPeople();
       } catch (err) {
         activePassword = "";
+        activeEmail = "";
+        activeSessionToken = "";
         clearSession();
         setSignedInState(false);
         showToast(`Sign in failed: ${err.message}`, "error");
@@ -1822,14 +1945,26 @@
       }
     });
 
-    signOutButton.addEventListener("click", () => {
+    signOutButton.addEventListener("click", async () => {
+      let revokeError = null;
+      try {
+        await callDirectory("revoke-session");
+      } catch (err) {
+        revokeError = err;
+        console.warn("Could not revoke the server session during sign-out:", err);
+      }
       activePassword = "";
+      activeEmail = "";
+      activeSessionToken = "";
       activeEditorPassword = "";
       clearSession();
       allPeople = [];
       filterAndRenderPeople();
       setSignedInState(false);
-      showToast("You have signed out.", "info");
+      showToast(
+        revokeError ? "Signed out here; the server session could not be revoked and will expire automatically." : "You have signed out.",
+        revokeError ? "error" : "info"
+      );
     });
 
     function returnToDirectory() {
@@ -1864,7 +1999,7 @@
         await callDirectory("verify-editor", { editorPassword });
         activeEditorPassword = editorPassword;
         editUnlocked = true;
-        await saveSession(activePassword, activeEditorPassword);
+        await saveSession(activeEmail, activePassword, activeSessionToken, activeEditorPassword);
         editPasswordForm.reset();
         setSignedInState(Boolean(activePassword));
         showToast("Editor mode unlocked!", "success");
@@ -1969,6 +2104,15 @@
 
     // Initial session recovery & offline-first startup
     (async function restoreSession() {
+      if (storageClient) {
+        const { data: authData, error: authError } = await storageClient.auth.getSession();
+        if (authError) {
+          console.warn("Could not check for a pending account invitation:", authError);
+        } else if (authData.session) {
+          passkeyEnrollmentPanel.hidden = false;
+        }
+      }
+
       // Pre-populate "Remember me" checkbox if device is remembered
       if (isDeviceRemembered()) {
         rememberDeviceCheckbox.checked = true;
@@ -1987,10 +2131,16 @@
       }
 
       const session = getStoredSession();
-      if (session && session.password) {
+      if (session && session.password && session.email && session.sessionToken) {
         try {
-          await callDirectory("verify", { password: session.password });
+          await callDirectory("check-session", {
+            password: session.password,
+            sessionToken: session.sessionToken,
+            fields: { email: session.email },
+          });
+          activeEmail = session.email;
           activePassword = session.password;
+          activeSessionToken = session.sessionToken;
           if (session.editorPassword) {
             try {
               await callDirectory("verify-editor", { editorPassword: session.editorPassword });
@@ -2004,13 +2154,18 @@
           setSignedInState(true);
           await loadPeople();
         } catch (err) {
-          // If network failed but device is remembered and we have cached data, activate offline view
-          if (!navigator.onLine || (err.message && (err.message.includes("Failed to fetch") || err.message.includes("NetworkError")))) {
+          // Only activate the offline view when the browser is actually offline.
+          if (!navigator.onLine) {
+            activeEmail = session.email;
             activePassword = session.password;
+            activeSessionToken = session.sessionToken;
             if (session.editorPassword) activeEditorPassword = session.editorPassword;
             setSignedInState(true);
             showToast("Offline mode: Using cached directory roster.", "info");
           } else {
+            activeEmail = "";
+            activePassword = "";
+            activeSessionToken = "";
             clearSession();
             setSignedInState(false);
           }

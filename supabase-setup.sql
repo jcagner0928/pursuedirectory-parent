@@ -1,5 +1,8 @@
--- Pursue password-only directory setup.
+-- Pursue directory setup: shared password plus per-member passkeys.
 -- Run this in Supabase Dashboard > SQL Editor before deploying the Edge Function.
+-- In Authentication > URL Configuration, set the Site URL to
+-- https://pursuedirectory-leaders.onrender.com and allow that URL as a redirect.
+-- Configure a production email provider so directory editors can invite members.
 --
 -- This creates a password HASH table; the raw shared password is never stored
 -- or exposed to the browser. After running this script, set the password using
@@ -59,6 +62,67 @@ alter table public.directory_settings
     'Craft Team',
     'T-shirt Team'
   ]::text[];
+
+create table if not exists public.directory_accounts (
+  user_id uuid primary key references auth.users (id) on delete cascade,
+  email text not null unique,
+  is_active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+-- Bootstrap the first directory account after running this script:
+-- 1. Invite the first administrator from Authentication > Users in Supabase.
+-- 2. Run the following, replacing the email with that invited address:
+-- insert into public.directory_accounts (user_id, email)
+-- select id, lower(email) from auth.users
+-- where lower(email) = lower('<FIRST_ADMIN_EMAIL>')
+-- on conflict (user_id) do nothing;
+-- After that person registers a passkey and signs in, editors can invite others
+-- from the directory's member-management screen.
+-- To revoke a member's access later, delete that user under Authentication > Users;
+-- their directory account, passkeys, and server sessions are removed automatically.
+
+create table if not exists public.directory_passkeys (
+  credential_id text primary key,
+  user_id uuid not null references public.directory_accounts (user_id) on delete cascade,
+  public_key text not null,
+  counter bigint not null default 0,
+  transports text[] not null default array[]::text[],
+  created_at timestamptz not null default now()
+);
+
+create index if not exists directory_passkeys_user_id_idx
+  on public.directory_passkeys (user_id);
+
+create table if not exists public.directory_passkey_challenges (
+  id uuid primary key default gen_random_uuid(),
+  challenge text not null,
+  challenge_type text not null check (challenge_type in ('registration', 'authentication')),
+  user_id uuid references public.directory_accounts (user_id) on delete cascade,
+  email text,
+  expires_at timestamptz not null
+);
+
+create table if not exists public.directory_sessions (
+  token_hash text primary key,
+  user_id uuid not null references public.directory_accounts (user_id) on delete cascade,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+
+alter table public.directory_accounts enable row level security;
+alter table public.directory_passkeys enable row level security;
+alter table public.directory_passkey_challenges enable row level security;
+alter table public.directory_sessions enable row level security;
+
+revoke all on public.directory_accounts from anon, authenticated;
+revoke all on public.directory_passkeys from anon, authenticated;
+revoke all on public.directory_passkey_challenges from anon, authenticated;
+revoke all on public.directory_sessions from anon, authenticated;
+grant all on public.directory_accounts to service_role;
+grant all on public.directory_passkeys to service_role;
+grant all on public.directory_passkey_challenges to service_role;
+grant all on public.directory_sessions to service_role;
 
 alter table public.directory_settings enable row level security;
 revoke all on public.directory_settings from anon, authenticated;

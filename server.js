@@ -56,7 +56,6 @@ const server = http.createServer((req, res) => {
       headers: {
         ...forwardedHeaders,
         host: SUPABASE_HOST,
-        origin: 'https://pursuedirectory.onrender.com', // Allowed origin in cloud Edge Function
       },
     }, (proxyRes) => {
       const headers = { ...proxyRes.headers };

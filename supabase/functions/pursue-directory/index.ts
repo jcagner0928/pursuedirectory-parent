@@ -1,12 +1,36 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+import {
+  generateAuthenticationOptions,
+  generateRegistrationOptions,
+  verifyAuthenticationResponse,
+  verifyRegistrationResponse,
+  type AuthenticationResponseJSON,
+  type RegistrationResponseJSON,
+} from "npm:@simplewebauthn/server@13.2.2";
 
-// Allow requests from the primary origin, GitHub Pages, or local development.
-const DEFAULT_ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") || "https://bvstmtteutzfwqdiovrm.supabase.co";
+// Allow requests from the production site, GitHub Pages, or local development.
+const PRODUCTION_ORIGIN = "https://pursuedirectory-leaders.onrender.com";
+const DEFAULT_ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") || PRODUCTION_ORIGIN;
+const SITE_ORIGIN = Deno.env.get("APP_ORIGIN") || PRODUCTION_ORIGIN;
+const RP_NAME = "Pursue Youth Directory";
+
+function getWebAuthnContext(requestOrigin: string | null) {
+  if (!requestOrigin) throw new Error("A browser origin is required for passkey authentication.");
+  const originUrl = new URL(requestOrigin);
+  const isProductionOrigin = requestOrigin === PRODUCTION_ORIGIN;
+  const isLocalOrigin = (originUrl.protocol === "http:" || originUrl.protocol === "https:")
+    && (originUrl.hostname === "localhost" || originUrl.hostname === "127.0.0.1");
+  if (!isProductionOrigin && !isLocalOrigin) {
+    throw new Error("Passkey authentication is not enabled for this origin.");
+  }
+  return { origin: requestOrigin, rpID: originUrl.hostname };
+}
 
 function getCorsHeaders(requestOrigin: string | null) {
   let origin = DEFAULT_ALLOWED_ORIGIN;
   if (requestOrigin) {
     if (
+      requestOrigin === PRODUCTION_ORIGIN ||
       requestOrigin === DEFAULT_ALLOWED_ORIGIN ||
       requestOrigin.endsWith(".github.io") ||
       requestOrigin.endsWith(".supabase.co") ||
@@ -95,9 +119,147 @@ function getClientIp(request: Request) {
 }
 
 async function hashIp(ip: string) {
-  const bytes = new TextEncoder().encode(ip);
+  return await sha256Hex(ip);
+}
+
+async function sha256Hex(value: string) {
+  const bytes = new TextEncoder().encode(value);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function encodeBase64Url(bytes: Uint8Array) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function decodeBase64Url(value: string) {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(base64 + "=".repeat((4 - base64.length % 4) % 4));
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+async function storePasskeyChallenge(
+  challenge: string,
+  challengeType: "registration" | "authentication",
+  details: { userId?: string; email?: string },
+) {
+  const now = new Date();
+  const { error: cleanupError } = await supabase
+    .from("directory_passkey_challenges")
+    .delete()
+    .lt("expires_at", now.toISOString());
+  if (cleanupError) throw cleanupError;
+  const { data, error } = await supabase
+    .from("directory_passkey_challenges")
+    .insert({
+      challenge,
+      challenge_type: challengeType,
+      user_id: details.userId || null,
+      email: details.email || null,
+      expires_at: new Date(now.getTime() + 5 * 60 * 1000).toISOString(),
+    })
+    .select("id")
+    .single();
+  if (error) throw error;
+  return data.id as string;
+}
+
+async function consumePasskeyChallenge(
+  id: unknown,
+  challengeType: "registration" | "authentication",
+  details: { userId?: string; email?: string },
+) {
+  if (typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id)) return null;
+  let query = supabase
+    .from("directory_passkey_challenges")
+    .delete()
+    .eq("id", id)
+    .eq("challenge_type", challengeType)
+    .gt("expires_at", new Date().toISOString());
+  if (details.userId) query = query.eq("user_id", details.userId);
+  if (details.email) query = query.eq("email", details.email);
+  const { data, error } = await query.select("challenge, user_id, email").maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+async function getInvitedUser(request: Request) {
+  const authorization = request.headers.get("authorization") || "";
+  const accessToken = authorization.match(/^Bearer\s+(.+)$/i)?.[1];
+  if (!accessToken) return null;
+  const { data, error } = await supabase.auth.getUser(accessToken);
+  if (error) {
+    if (error.status === 401) return null;
+    throw error;
+  }
+  if (!data.user) return null;
+  const { data: account, error: accountError } = await supabase
+    .from("directory_accounts")
+    .select("user_id, email, is_active")
+    .eq("user_id", data.user.id)
+    .eq("is_active", true)
+    .maybeSingle();
+  if (accountError) throw accountError;
+  if (!account || account.email.toLowerCase() !== (data.user.email || "").toLowerCase()) return null;
+  return account;
+}
+
+async function getActiveDirectorySession(sessionToken: unknown) {
+  if (typeof sessionToken !== "string" || sessionToken.length < 32 || sessionToken.length > 256) return null;
+  const tokenHash = await sha256Hex(sessionToken);
+  const { data: session, error: sessionError } = await supabase
+    .from("directory_sessions")
+    .select("user_id")
+    .eq("token_hash", tokenHash)
+    .gt("expires_at", new Date().toISOString())
+    .maybeSingle();
+  if (sessionError) throw sessionError;
+  if (!session) return null;
+  const { data: account, error: accountError } = await supabase
+    .from("directory_accounts")
+    .select("user_id, email")
+    .eq("user_id", session.user_id)
+    .eq("is_active", true)
+    .maybeSingle();
+  if (accountError) throw accountError;
+  return account ? { ...account, tokenHash } : null;
+}
+
+function validEmail(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length <= 320
+    && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isAuthenticationResponse(value: unknown): value is AuthenticationResponseJSON {
+  if (!isRecord(value) || value.type !== "public-key"
+    || typeof value.id !== "string" || typeof value.rawId !== "string"
+    || !isRecord(value.response) || !isRecord(value.clientExtensionResults)) {
+    return false;
+  }
+  return typeof value.response.authenticatorData === "string"
+    && typeof value.response.clientDataJSON === "string"
+    && typeof value.response.signature === "string"
+    && (value.response.userHandle === undefined
+      || value.response.userHandle === null
+      || typeof value.response.userHandle === "string");
+}
+
+function isRegistrationResponse(value: unknown): value is RegistrationResponseJSON {
+  return Boolean(isRecord(value)
+    && value.type === "public-key"
+    && typeof value.id === "string"
+    && typeof value.rawId === "string"
+    && isRecord(value.response)
+    && typeof value.response.attestationObject === "string"
+    && typeof value.response.clientDataJSON === "string"
+    && isRecord(value.clientExtensionResults));
 }
 
 function sanitizedErrorMessage(error: unknown) {
@@ -139,8 +301,221 @@ Deno.serve(async (request) => {
     const getValue = (name: string) => input[name];
     const action = getValue("action");
     const password = getValue("password");
+    if (typeof action !== "string") {
+      return jsonResponse({ error: "A valid action is required." }, 400, requestOrigin);
+    }
 
-    if (typeof action !== "string" || typeof password !== "string" || password.length < 1 || password.length > 256) {
+    if (action === "passkey-auth-options") {
+      const emailValue = getValue("email");
+      if (!validEmail(emailValue) || typeof password !== "string" || password.length < 1 || password.length > 256) {
+        return jsonResponse({ error: "Enter a valid email address and the shared directory password." }, 400, requestOrigin);
+      }
+      const { data: passwordValid, error: passwordError } = await supabase.rpc(
+        "verify_directory_password",
+        { p_password: password, p_ip_hash: await hashIp(getClientIp(request)) },
+      );
+      if (passwordError) {
+        if (passwordError.message.includes("too many password attempts")) {
+          return jsonResponse({ error: "Too many incorrect password attempts. Try again in 15 minutes." }, 429, requestOrigin);
+        }
+        throw passwordError;
+      }
+      if (!passwordValid) {
+        return jsonResponse({ error: "Incorrect password." }, 401, requestOrigin);
+      }
+      const email = emailValue.trim().toLowerCase();
+      const { rpID } = getWebAuthnContext(requestOrigin);
+      const options = await generateAuthenticationOptions({
+        rpID,
+        userVerification: "required",
+        allowCredentials: [],
+      });
+      const challengeId = await storePasskeyChallenge(options.challenge, "authentication", { email });
+      return jsonResponse({ options, challenge_id: challengeId }, 200, requestOrigin);
+    }
+
+    if (action === "passkey-auth-verify") {
+      const emailValue = getValue("email");
+      const challengeId = getValue("challenge_id");
+      const credentialValue = getValue("credential");
+      if (!validEmail(emailValue) || !isAuthenticationResponse(credentialValue)) {
+        return jsonResponse({ error: "The passkey response is invalid." }, 400, requestOrigin);
+      }
+      if (typeof password !== "string" || password.length < 1 || password.length > 256) {
+        return jsonResponse({ error: "Enter the shared directory password." }, 400, requestOrigin);
+      }
+      const email = emailValue.trim().toLowerCase();
+      const challenge = await consumePasskeyChallenge(challengeId, "authentication", { email });
+      if (!challenge || typeof challenge.challenge !== "string") {
+        return jsonResponse({ error: "This passkey request expired. Please try again." }, 401, requestOrigin);
+      }
+
+      const credential = credentialValue;
+      if (credential.id.length > 2048) {
+        return jsonResponse({ error: "The passkey response is invalid." }, 400, requestOrigin);
+      }
+      const { data: passkey, error: passkeyError } = await supabase
+        .from("directory_passkeys")
+        .select("credential_id, user_id, public_key, counter, transports")
+        .eq("credential_id", credential.id)
+        .maybeSingle();
+      if (passkeyError) throw passkeyError;
+      if (!passkey) {
+        return jsonResponse({ error: "The email, password, or passkey is incorrect." }, 401, requestOrigin);
+      }
+      const { data: account, error: accountError } = await supabase
+        .from("directory_accounts")
+        .select("user_id, email")
+        .eq("user_id", passkey.user_id)
+        .eq("is_active", true)
+        .maybeSingle();
+      if (accountError) throw accountError;
+      if (!account || account.email.toLowerCase() !== email) {
+        return jsonResponse({ error: "The email, password, or passkey is incorrect." }, 401, requestOrigin);
+      }
+      const currentCounter = Number(passkey.counter);
+      if (!Number.isSafeInteger(currentCounter) || currentCounter < 0) {
+        throw new Error("Stored passkey counter is invalid.");
+      }
+
+      const { origin, rpID } = getWebAuthnContext(requestOrigin);
+      let verification;
+      try {
+        verification = await verifyAuthenticationResponse({
+          response: credential,
+          expectedChallenge: challenge.challenge,
+          expectedOrigin: origin,
+          expectedRPID: rpID,
+          requireUserVerification: true,
+          credential: {
+            id: passkey.credential_id,
+            publicKey: decodeBase64Url(passkey.public_key),
+            counter: currentCounter,
+            transports: passkey.transports,
+          },
+        });
+      } catch (verificationError) {
+        console.warn("Passkey login verification failed:", verificationError);
+        return jsonResponse({ error: "The email, password, or passkey is incorrect." }, 401, requestOrigin);
+      }
+      if (!verification.verified) {
+        return jsonResponse({ error: "The email, password, or passkey is incorrect." }, 401, requestOrigin);
+      }
+
+      const { data: passwordValid, error: passwordError } = await supabase.rpc(
+        "verify_directory_password",
+        { p_password: password, p_ip_hash: await hashIp(getClientIp(request)) },
+      );
+      if (passwordError) {
+        if (passwordError.message.includes("too many password attempts")) {
+          return jsonResponse({ error: "Too many incorrect password attempts. Try again in 15 minutes." }, 429, requestOrigin);
+        }
+        throw passwordError;
+      }
+      if (!passwordValid) {
+        return jsonResponse({ error: "The email, password, or passkey is incorrect." }, 401, requestOrigin);
+      }
+
+      const newCounter = verification.authenticationInfo.newCounter;
+      const { error: counterError } = await supabase
+        .from("directory_passkeys")
+        .update({ counter: newCounter })
+        .eq("credential_id", passkey.credential_id);
+      if (counterError) throw counterError;
+
+      const sessionToken = encodeBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+      const tokenHash = await sha256Hex(sessionToken);
+      const sessionDuration = getValue("remember") === true ? 30 : 1;
+      const { error: expiredSessionError } = await supabase
+        .from("directory_sessions")
+        .delete()
+        .lt("expires_at", new Date().toISOString());
+      if (expiredSessionError) throw expiredSessionError;
+      const { error: sessionError } = await supabase.from("directory_sessions").insert({
+        token_hash: tokenHash,
+        user_id: account.user_id,
+        expires_at: new Date(Date.now() + sessionDuration * 24 * 60 * 60 * 1000).toISOString(),
+      });
+      if (sessionError) throw sessionError;
+      return jsonResponse({ session_token: sessionToken }, 200, requestOrigin);
+    }
+
+    if (action === "passkey-registration-options" || action === "passkey-registration-verify") {
+      const account = await getInvitedUser(request);
+      if (!account) {
+        return jsonResponse({ error: "Accept a valid directory invitation before registering a passkey." }, 401, requestOrigin);
+      }
+      const { origin, rpID } = getWebAuthnContext(requestOrigin);
+      if (action === "passkey-registration-options") {
+        const { data: existingPasskeys, error: existingError } = await supabase
+          .from("directory_passkeys")
+          .select("credential_id, transports")
+          .eq("user_id", account.user_id);
+        if (existingError) throw existingError;
+        const options = await generateRegistrationOptions({
+          rpName: RP_NAME,
+          rpID,
+          userID: new TextEncoder().encode(account.user_id),
+          userName: account.email,
+          userDisplayName: account.email,
+          attestationType: "none",
+          authenticatorSelection: {
+            residentKey: "required",
+            userVerification: "required",
+          },
+          excludeCredentials: (existingPasskeys || []).map((item) => ({
+            id: item.credential_id,
+            transports: item.transports,
+          })),
+        });
+        const challengeId = await storePasskeyChallenge(options.challenge, "registration", {
+          userId: account.user_id,
+        });
+        return jsonResponse({ options, challenge_id: challengeId }, 200, requestOrigin);
+      }
+
+      const challengeId = getValue("challenge_id");
+      const credentialValue = getValue("credential");
+      if (!isRegistrationResponse(credentialValue)) {
+        return jsonResponse({ error: "The passkey registration response is invalid." }, 400, requestOrigin);
+      }
+      const challenge = await consumePasskeyChallenge(challengeId, "registration", {
+        userId: account.user_id,
+      });
+      if (!challenge || typeof challenge.challenge !== "string") {
+        return jsonResponse({ error: "This passkey request expired. Please try again." }, 401, requestOrigin);
+      }
+
+      let verification;
+      try {
+        verification = await verifyRegistrationResponse({
+          response: credentialValue,
+          expectedChallenge: challenge.challenge,
+          expectedOrigin: origin,
+          expectedRPID: rpID,
+          requireUserVerification: true,
+        });
+      } catch (verificationError) {
+        console.warn("Passkey registration verification failed:", verificationError);
+        return jsonResponse({ error: "The passkey could not be verified. Please try again." }, 400, requestOrigin);
+      }
+      if (!verification.verified || !verification.registrationInfo) {
+        return jsonResponse({ error: "The passkey could not be verified. Please try again." }, 400, requestOrigin);
+      }
+
+      const credential = verification.registrationInfo.credential;
+      const { error: insertError } = await supabase.from("directory_passkeys").insert({
+        credential_id: credential.id,
+        user_id: account.user_id,
+        public_key: encodeBase64Url(credential.publicKey),
+        counter: credential.counter,
+        transports: credential.transports || [],
+      });
+      if (insertError) throw insertError;
+      return jsonResponse({ ok: true }, 200, requestOrigin);
+    }
+
+    if (typeof password !== "string" || password.length < 1 || password.length > 256) {
       return jsonResponse({ error: "A valid action and password are required." }, 400, requestOrigin);
     }
 
@@ -158,7 +533,12 @@ Deno.serve(async (request) => {
       return jsonResponse({ error: "Incorrect password." }, 401, requestOrigin);
     }
 
-    const editorActions = new Set(["verify-editor", "prepare-upload", "add", "batch-add", "update", "delete", "update-teams"]);
+    const activeSession = await getActiveDirectorySession(getValue("session_token"));
+    if (!activeSession || (action === "check-session" && getValue("email") !== activeSession.email)) {
+      return jsonResponse({ error: "Your sign-in expired. Please sign in with your passkey again." }, 401, requestOrigin);
+    }
+
+    const editorActions = new Set(["verify-editor", "invite-member", "prepare-upload", "add", "batch-add", "update", "delete", "update-teams"]);
     if (editorActions.has(action)) {
       const editorPassword = getValue("editor_password");
       if (typeof editorPassword !== "string" || editorPassword.length < 1 || editorPassword.length > 256) {
@@ -180,7 +560,45 @@ Deno.serve(async (request) => {
       }
     }
 
-    if (action === "verify") {
+    if (action === "check-session") {
+      return jsonResponse({ ok: true }, 200, requestOrigin);
+    }
+
+    if (action === "revoke-session") {
+      const { error } = await supabase
+        .from("directory_sessions")
+        .delete()
+        .eq("token_hash", activeSession.tokenHash);
+      if (error) throw error;
+      return jsonResponse({ ok: true }, 200, requestOrigin);
+    }
+
+    if (action === "invite-member") {
+      const emailValue = getValue("email");
+      if (!validEmail(emailValue)) {
+        return jsonResponse({ error: "Enter a valid email address." }, 400, requestOrigin);
+      }
+      const email = emailValue.trim().toLowerCase();
+      const { data: existingAccount, error: existingError } = await supabase
+        .from("directory_accounts")
+        .select("user_id")
+        .eq("email", email)
+        .maybeSingle();
+      if (existingError) throw existingError;
+      if (existingAccount) {
+        return jsonResponse({ error: "That email already has a directory account." }, 409, requestOrigin);
+      }
+      const { data: invitation, error: invitationError } = await supabase.auth.admin.inviteUserByEmail(
+        email,
+        { redirectTo: SITE_ORIGIN },
+      );
+      if (invitationError) throw invitationError;
+      if (!invitation.user) throw new Error("Supabase did not return the invited user.");
+      const { error: accountError } = await supabase.from("directory_accounts").insert({
+        user_id: invitation.user.id,
+        email,
+      });
+      if (accountError) throw accountError;
       return jsonResponse({ ok: true }, 200, requestOrigin);
     }
 
