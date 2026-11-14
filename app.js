@@ -588,7 +588,15 @@
       });
     }
 
-    // CSV Export
+    // CSV Export with Formula Injection (CWE-1236) Protection
+    function sanitizeCsvCell(val) {
+      let str = (val || "").toString();
+      if (/^[=+\-@\t\r]/.test(str)) {
+        str = "'" + str;
+      }
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+
     function exportDirectoryCSV() {
       if (!allPeople.length) {
         showToast("No members to export", "info");
@@ -596,15 +604,15 @@
       }
       const headers = ["Name", "Grade", "Roles", "Teams", "Email", "Phone", "Emergency Contact", "Emergency Phone", "Emergency Relationship"];
       const rows = allPeople.map((p) => [
-        `"${(p.name || "").replace(/"/g, '""')}"`,
-        `"${(p.grade || "").replace(/"/g, '""')}"`,
-        `"${(Array.isArray(p.roles) ? p.roles.join(", ") : "").replace(/"/g, '""')}"`,
-        `"${(Array.isArray(p.teams) ? p.teams.join(", ") : "").replace(/"/g, '""')}"`,
-        `"${(p.email || "").replace(/"/g, '""')}"`,
-        `"${(p.phone || "").replace(/"/g, '""')}"`,
-        `"${(p.emergency_contact_name || "").replace(/"/g, '""')}"`,
-        `"${(p.emergency_contact_phone || "").replace(/"/g, '""')}"`,
-        `"${(p.emergency_contact_relationship || "").replace(/"/g, '""')}"`
+        sanitizeCsvCell(p.name),
+        sanitizeCsvCell(p.grade),
+        sanitizeCsvCell(Array.isArray(p.roles) ? p.roles.join(", ") : ""),
+        sanitizeCsvCell(Array.isArray(p.teams) ? p.teams.join(", ") : ""),
+        sanitizeCsvCell(p.email),
+        sanitizeCsvCell(p.phone),
+        sanitizeCsvCell(p.emergency_contact_name),
+        sanitizeCsvCell(p.emergency_contact_phone),
+        sanitizeCsvCell(p.emergency_contact_relationship)
       ]);
       const csv = [headers.join(","), ...rows.map((r) => r.join(","))].join("\r\n");
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -872,16 +880,20 @@
       }
     });
 
-    // Highlight search match in text safely
+    // Highlight search match in text safely (stateless regex matching)
     function highlightQuery(text, query) {
       if (!text) return "";
-      if (!query) return escapeHtml(text);
-      const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const cleanText = (text || "").toString();
+      if (!query || !query.trim()) return escapeHtml(cleanText);
+      const trimmedQuery = query.trim();
+      const escapedQuery = trimmedQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const regex = new RegExp(`(${escapedQuery})`, "gi");
-      const parts = text.split(regex);
-      return parts.map((part) =>
-        regex.test(part) ? `<mark class="search-highlight">${escapeHtml(part)}</mark>` : escapeHtml(part)
-      ).join("");
+      const parts = cleanText.split(regex);
+      return parts.map((part) => {
+        if (!part) return "";
+        const isMatch = part.toLowerCase() === trimmedQuery.toLowerCase();
+        return isMatch ? `<mark class="search-highlight">${escapeHtml(part)}</mark>` : escapeHtml(part);
+      }).join("");
     }
 
     function escapeHtml(str) {
@@ -1024,6 +1036,66 @@
     detailModal.addEventListener("click", (e) => {
       if (e.target === detailModal) closeMemberModal();
     });
+
+    // vCard (VCF) Export with CRLF injection protection
+    function downloadVCard(person) {
+      if (!person || !person.name) return;
+      const clean = (val) => (val || "").toString().replace(/[\r\n]+/g, " ").trim();
+      const cleanPhone = (val) => (val || "").toString().replace(/[^\d+]/g, "").trim();
+
+      const name = clean(person.name);
+      const email = clean(person.email);
+      const phone = cleanPhone(person.phone);
+      const grade = clean(person.grade);
+      const roles = Array.isArray(person.roles) ? clean(person.roles.join(", ")) : "";
+      const teams = Array.isArray(person.teams) ? clean(person.teams.join(", ")) : "";
+
+      const vcard = [
+        "BEGIN:VCARD",
+        "VERSION:3.0",
+        `FN:${name}`,
+        `N:${name};;;;`,
+        "ORG:Pursue Youth Community",
+        grade ? `TITLE:${grade}${roles ? ` (${roles})` : ""}` : "",
+        phone ? `TEL;TYPE=CELL:${phone}` : "",
+        email ? `EMAIL;TYPE=INTERNET:${email}` : "",
+        teams ? `NOTE:Teams: ${teams}` : "",
+        "END:VCARD"
+      ].filter(Boolean).join("\r\n");
+
+      const blob = new Blob([vcard], { type: "text/vcard;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${name.replace(/[^a-zA-Z0-9_-]/g, "_")}.vcf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      showToast(`Saved contact for ${name}`, "success");
+    }
+
+    // Secure clipboard helper with fallback
+    async function copyToClipboard(text, targetBtn) {
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const textarea = document.createElement("textarea");
+          textarea.value = text;
+          textarea.style.position = "fixed";
+          textarea.style.opacity = "0";
+          document.body.appendChild(textarea);
+          textarea.focus();
+          textarea.select();
+          document.execCommand("copy");
+          document.body.removeChild(textarea);
+        }
+        showToast("Contact details copied to clipboard!", "success");
+      } catch (err) {
+        showToast("Could not copy to clipboard.", "error");
+      }
+    }
 
     modalVcardBtn.addEventListener("click", () => {
       if (currentDetailPerson) downloadVCard(currentDetailPerson);
@@ -1218,7 +1290,7 @@
             <rect width="20" height="16" x="2" y="4" rx="2"></rect>
             <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path>
           </svg>
-          <a href="mailto:${person.email}" onclick="event.stopPropagation();">${highlightQuery(person.email, query)}</a>
+          <a href="mailto:${escapeHtml(person.email)}" onclick="event.stopPropagation();">${highlightQuery(person.email, query)}</a>
         `;
         contact.appendChild(emailRow);
         info.append(title, badges, contact);
@@ -1331,7 +1403,7 @@
       if (person.email) {
         const email = document.createElement("span");
         email.className = "list-email";
-        email.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="20" height="16" x="2" y="4" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg><a href="mailto:${person.email}" onclick="event.stopPropagation();">${highlightQuery(person.email, query)}</a>`;
+        email.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="20" height="16" x="2" y="4" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg><a href="mailto:${escapeHtml(person.email)}" onclick="event.stopPropagation();">${highlightQuery(person.email, query)}</a>`;
         contactCol.appendChild(email);
       }
 

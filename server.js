@@ -4,7 +4,8 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = 3000;
-const ROOT_DIR = __dirname;
+const ROOT_DIR = path.resolve(__dirname);
+const ROOT_DIR_WITH_SEP = ROOT_DIR.endsWith(path.sep) ? ROOT_DIR : ROOT_DIR + path.sep;
 const SUPABASE_HOST = 'bvstmtteutzfwqdiovrm.supabase.co';
 
 const MIME_TYPES = {
@@ -19,27 +20,43 @@ const MIME_TYPES = {
 };
 
 const server = http.createServer((req, res) => {
-  // 1. Proxy Edge Function calls to Supabase with allowed origin to prevent CORS blocks in local testing
-  if (req.url && req.url.startsWith('/functions/v1/pursue-directory')) {
+  const [rawPath, rawQuery] = (req.url || '').split('?');
+
+  // 1. Proxy Edge Function calls specifically to the directory endpoint
+  if (rawPath === '/functions/v1/pursue-directory') {
     if (req.method === 'OPTIONS') {
       res.writeHead(200, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
         'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info',
+        'Vary': 'Origin',
       });
       res.end('ok');
       return;
     }
 
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Method not allowed.' }));
+      return;
+    }
+
+    // Filter hop-by-hop headers
+    const forwardedHeaders = { ...req.headers };
+    delete forwardedHeaders['host'];
+    delete forwardedHeaders['connection'];
+    delete forwardedHeaders['keep-alive'];
+    delete forwardedHeaders['transfer-encoding'];
+
     const proxyReq = https.request({
       hostname: SUPABASE_HOST,
       port: 443,
-      path: req.url,
-      method: req.method,
+      path: '/functions/v1/pursue-directory' + (rawQuery ? `?${rawQuery}` : ''),
+      method: 'POST',
       headers: {
-        ...req.headers,
+        ...forwardedHeaders,
         host: SUPABASE_HOST,
-        origin: 'https://pursuedirectory.onrender.com', // Cloud function's configured origin
+        origin: 'https://pursuedirectory.onrender.com', // Allowed origin in cloud Edge Function
       },
     }, (proxyRes) => {
       const headers = { ...proxyRes.headers };
@@ -50,7 +67,7 @@ const server = http.createServer((req, res) => {
     });
 
     proxyReq.on('error', (err) => {
-      console.error('Proxy request error:', err);
+      console.error('Proxy error:', err);
       res.writeHead(502, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: `Proxy error: ${err.message}` }));
     });
@@ -59,13 +76,30 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 2. Serve static files
-  let safePath = path.normalize(req.url.split('?')[0]);
-  if (safePath === '/' || safePath === '\\') safePath = '/index.html';
-  const filePath = path.join(ROOT_DIR, safePath);
+  // 2. Serve static files with strict path normalization & directory traversal defense
+  let decodedPath = '';
+  try {
+    decodedPath = decodeURIComponent(rawPath);
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.end('Bad Request: Invalid URL encoding');
+    return;
+  }
 
-  if (!filePath.startsWith(ROOT_DIR)) {
-    res.writeHead(403);
+  // Reject null bytes and directory traversal probes
+  if (decodedPath.includes('\0')) {
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.end('Bad Request');
+    return;
+  }
+
+  let safeRelPath = path.normalize(decodedPath);
+  if (safeRelPath === '/' || safeRelPath === '\\') safeRelPath = '/index.html';
+  const filePath = path.resolve(ROOT_DIR, '.' + safeRelPath);
+
+  // Strict boundary check against ROOT_DIR
+  if (filePath !== ROOT_DIR && !filePath.startsWith(ROOT_DIR_WITH_SEP)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain' });
     res.end('Forbidden');
     return;
   }
@@ -79,7 +113,10 @@ const server = http.createServer((req, res) => {
 
     const ext = path.extname(filePath).toLowerCase();
     const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': contentType });
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'X-Content-Type-Options': 'nosniff',
+    });
     fs.createReadStream(filePath).pipe(res);
   });
 });

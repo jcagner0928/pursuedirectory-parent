@@ -81,13 +81,17 @@ function jsonResponse(body: unknown, status = 200, origin: string | null = null)
 
 function getClientIp(request: Request) {
   const cloudflareIp = request.headers.get("cf-connecting-ip");
-  if (cloudflareIp) return cloudflareIp;
+  if (cloudflareIp && /^[0-9a-f:.]+$/i.test(cloudflareIp.trim())) return cloudflareIp.trim();
 
   const realIp = request.headers.get("x-real-ip");
-  if (realIp) return realIp;
+  if (realIp && /^[0-9a-f:.]+$/i.test(realIp.trim())) return realIp.trim();
 
   const forwarded = request.headers.get("x-forwarded-for");
-  return forwarded?.split(",")[0].trim() || "unknown";
+  if (forwarded) {
+    const ips = forwarded.split(",").map((ip) => ip.trim()).filter((ip) => /^[0-9a-f:.]+$/i.test(ip));
+    if (ips.length > 0) return ips[0];
+  }
+  return "unknown";
 }
 
 async function hashIp(ip: string) {
@@ -113,11 +117,25 @@ Deno.serve(async (request) => {
   }
 
   try {
+    const contentLength = parseInt(request.headers.get("content-length") || "0", 10);
+    if (contentLength > maxRequestSize) {
+      return jsonResponse({ error: "Request body is too large." }, 413, requestOrigin);
+    }
+
     const rawBody = await request.text();
     if (new TextEncoder().encode(rawBody).byteLength > maxRequestSize) {
       return jsonResponse({ error: "Request body is too large." }, 413, requestOrigin);
     }
-    const input = JSON.parse(rawBody) as Record<string, unknown>;
+
+    let input: Record<string, unknown>;
+    try {
+      input = JSON.parse(rawBody) as Record<string, unknown>;
+      if (!input || typeof input !== "object" || Array.isArray(input)) {
+        return jsonResponse({ error: "Request body must be a JSON object." }, 400, requestOrigin);
+      }
+    } catch {
+      return jsonResponse({ error: "Malformed JSON payload." }, 400, requestOrigin);
+    }
     const getValue = (name: string) => input[name];
     const action = getValue("action");
     const password = getValue("password");
