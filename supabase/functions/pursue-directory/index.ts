@@ -1,15 +1,22 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
-// Lock CORS to the known deployment origin. Update this if the site is hosted elsewhere.
-const ALLOWED_ORIGIN = "https://bvstmtteutzfwqdiovrm.supabase.co";
+// Allow requests from the primary origin, GitHub Pages, or local development.
+const DEFAULT_ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") || "https://bvstmtteutzfwqdiovrm.supabase.co";
 
 function getCorsHeaders(requestOrigin: string | null) {
-  // Only echo the origin back when it matches the allowed origin exactly.
-  // For same-origin requests (no Origin header) we still allow the call.
-  const origin =
-    requestOrigin && requestOrigin === ALLOWED_ORIGIN
-      ? requestOrigin
-      : ALLOWED_ORIGIN;
+  let origin = DEFAULT_ALLOWED_ORIGIN;
+  if (requestOrigin) {
+    if (
+      requestOrigin === DEFAULT_ALLOWED_ORIGIN ||
+      requestOrigin.endsWith(".github.io") ||
+      requestOrigin.endsWith(".supabase.co") ||
+      requestOrigin.startsWith("http://localhost:") ||
+      requestOrigin.startsWith("http://127.0.0.1:") ||
+      requestOrigin.startsWith("https://localhost:")
+    ) {
+      origin = requestOrigin;
+    }
+  }
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
@@ -20,7 +27,7 @@ function getCorsHeaders(requestOrigin: string | null) {
 
 const bucket = "pursue-people";
 const maxCompressedPhotoSize = 200 * 1024;
-const maxRequestSize = 64 * 1024;
+const maxRequestSize = 256 * 1024;
 const allowedPhotoTypes = new Set([
   "image/jpeg",
   "image/png",
@@ -133,7 +140,7 @@ Deno.serve(async (request) => {
       return jsonResponse({ error: "Incorrect password." }, 401, requestOrigin);
     }
 
-    const editorActions = new Set(["verify-editor", "prepare-upload", "add", "update", "delete", "update-teams"]);
+    const editorActions = new Set(["verify-editor", "prepare-upload", "add", "batch-add", "update", "delete", "update-teams"]);
     if (editorActions.has(action)) {
       const editorPassword = getValue("editor_password");
       if (typeof editorPassword !== "string" || editorPassword.length < 1 || editorPassword.length > 256) {
@@ -448,6 +455,115 @@ Deno.serve(async (request) => {
       }
 
       return jsonResponse({ ok: true });
+    }
+
+    if (action === "batch-add") {
+      const peopleInput = getValue("people");
+      if (!Array.isArray(peopleInput) || peopleInput.length === 0) {
+        return jsonResponse({ error: "An array of members to add is required." }, 400, requestOrigin);
+      }
+      if (peopleInput.length > 250) {
+        return jsonResponse({ error: "Batch size exceeds the 250 member limit." }, 400, requestOrigin);
+      }
+
+      const validatedPeople: Array<Record<string, unknown>> = [];
+      const allBatchTeams: string[] = [];
+
+      for (let i = 0; i < peopleInput.length; i++) {
+        const item = peopleInput[i];
+        if (!item || typeof item !== "object") {
+          return jsonResponse({ error: `Invalid entry at index ${i + 1}.` }, 400, requestOrigin);
+        }
+        const entry = item as Record<string, unknown>;
+        const nameVal = entry.name;
+        const emailVal = entry.email;
+        const phoneVal = entry.phone;
+        const gradeVal = entry.grade;
+        const rolesVal = entry.roles;
+        const teamsVal = entry.teams;
+        const emergencyNameVal = entry.emergency_contact_name;
+        const emergencyPhoneVal = entry.emergency_contact_phone;
+        const emergencyRelVal = entry.emergency_contact_relationship;
+
+        if (typeof nameVal !== "string" || nameVal.trim().length < 1 || nameVal.trim().length > 200) {
+          return jsonResponse({ error: `Member ${i + 1} has an invalid name.` }, 400, requestOrigin);
+        }
+        const name = nameVal.trim();
+        const email = typeof emailVal === "string" ? emailVal.trim() : "";
+        const phone = typeof phoneVal === "string" ? phoneVal.trim() : "";
+
+        if (!email && !phone) {
+          return jsonResponse({ error: `Member "${name}" requires at least an email address or phone number.` }, 400, requestOrigin);
+        }
+        if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          return jsonResponse({ error: `Member "${name}" has an invalid email address.` }, 400, requestOrigin);
+        }
+        if (email.length > 320 || phone.length > 50) {
+          return jsonResponse({ error: `Member "${name}" has contact details that are too long.` }, 400, requestOrigin);
+        }
+        if (typeof gradeVal !== "string" || !allowedGrades.has(gradeVal)) {
+          return jsonResponse({ error: `Member "${name}" has an invalid grade: "${gradeVal}".` }, 400, requestOrigin);
+        }
+        const roles = getAdultRoles(rolesVal, gradeVal);
+        if (roles === false) {
+          return jsonResponse({ error: `Member "${name}" has invalid adult roles.` }, 400, requestOrigin);
+        }
+
+        const cleanTeams = Array.isArray(teamsVal)
+          ? Array.from(new Set(
+              teamsVal
+                .filter((t): t is string => typeof t === "string" && t.trim().length > 0 && t.trim().length <= 60)
+                .map((t) => t.trim())
+            ))
+          : [];
+        allBatchTeams.push(...cleanTeams);
+
+        const emergencyContactName = typeof emergencyNameVal === "string" && emergencyNameVal.trim().length > 0
+          ? emergencyNameVal.trim().slice(0, 200)
+          : null;
+        const emergencyContactPhone = typeof emergencyPhoneVal === "string" && emergencyPhoneVal.trim().length > 0
+          ? emergencyPhoneVal.trim().slice(0, 50)
+          : null;
+        const emergencyContactRel = typeof emergencyRelVal === "string" && emergencyRelVal.trim().length > 0
+          ? emergencyRelVal.trim().slice(0, 100)
+          : null;
+
+        validatedPeople.push({
+          name,
+          email: email || null,
+          phone: phone || null,
+          grade: gradeVal,
+          roles,
+          photo_path: null,
+          teams: cleanTeams,
+          emergency_contact_name: emergencyContactName,
+          emergency_contact_phone: emergencyContactPhone,
+          emergency_contact_relationship: emergencyContactRel,
+        });
+      }
+
+      let { error: insertError } = await supabase.from("people").insert(validatedPeople);
+      if (insertError && (insertError.message.includes("column") || insertError.message.includes("does not exist"))) {
+        console.warn("Retrying batch insert without optional extended columns:", insertError.message);
+        const fallbackBatch = validatedPeople.map((p) => ({
+          name: p.name,
+          email: p.email,
+          phone: p.phone,
+          grade: p.grade,
+          roles: p.roles,
+          photo_path: null,
+        }));
+        const retryResult = await supabase.from("people").insert(fallbackBatch);
+        insertError = retryResult.error;
+      }
+
+      if (insertError) throw insertError;
+
+      if (allBatchTeams.length) {
+        await syncTeams(Array.from(new Set(allBatchTeams)));
+      }
+
+      return jsonResponse({ ok: true, count: validatedPeople.length }, 200, requestOrigin);
     }
 
     if (action === "update") {
