@@ -143,7 +143,7 @@ function decodeBase64Url(value: string) {
 async function storePasskeyChallenge(
   challenge: string,
   challengeType: "registration" | "authentication",
-  details: { userId?: string; email?: string },
+  details: { userId?: string; email?: string; invitationId?: string },
 ) {
   const now = new Date();
   const { error: cleanupError } = await supabase
@@ -157,6 +157,7 @@ async function storePasskeyChallenge(
       challenge,
       challenge_type: challengeType,
       user_id: details.userId || null,
+      invitation_id: details.invitationId || null,
       email: details.email || null,
       expires_at: new Date(now.getTime() + 5 * 60 * 1000).toISOString(),
     })
@@ -169,7 +170,7 @@ async function storePasskeyChallenge(
 async function consumePasskeyChallenge(
   id: unknown,
   challengeType: "registration" | "authentication",
-  details: { userId?: string; email?: string },
+  details: { userId?: string; email?: string; invitationId?: string },
 ) {
   if (typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id)) return null;
   let query = supabase
@@ -179,31 +180,33 @@ async function consumePasskeyChallenge(
     .eq("challenge_type", challengeType)
     .gt("expires_at", new Date().toISOString());
   if (details.userId) query = query.eq("user_id", details.userId);
+  if (details.invitationId) query = query.eq("invitation_id", details.invitationId);
   if (details.email) query = query.eq("email", details.email);
-  const { data, error } = await query.select("challenge, user_id, email").maybeSingle();
+  const { data, error } = await query.select("challenge, user_id, invitation_id, email").maybeSingle();
   if (error) throw error;
   return data;
 }
 
-async function getInvitedUser(request: Request) {
-  const authorization = request.headers.get("authorization") || "";
-  const accessToken = authorization.match(/^Bearer\s+(.+)$/i)?.[1];
-  if (!accessToken) return null;
-  const { data, error } = await supabase.auth.getUser(accessToken);
-  if (error) {
-    if (error.status === 401) return null;
-    throw error;
-  }
-  if (!data.user) return null;
+async function getValidInvitation(token: unknown) {
+  if (typeof token !== "string" || token.length < 32 || token.length > 128) return null;
+  const tokenHash = await sha256Hex(token);
+  const { data: invitation, error: invitationError } = await supabase
+    .from("directory_invitations")
+    .select("id, user_id")
+    .eq("token_hash", tokenHash)
+    .is("used_at", null)
+    .gt("expires_at", new Date().toISOString())
+    .maybeSingle();
+  if (invitationError) throw invitationError;
+  if (!invitation) return null;
   const { data: account, error: accountError } = await supabase
     .from("directory_accounts")
-    .select("user_id, email, is_active")
-    .eq("user_id", data.user.id)
+    .select("user_id, email")
+    .eq("user_id", invitation.user_id)
     .eq("is_active", true)
     .maybeSingle();
   if (accountError) throw accountError;
-  if (!account || account.email.toLowerCase() !== (data.user.email || "").toLowerCase()) return null;
-  return account;
+  return account ? { ...account, invitationId: invitation.id } : null;
 }
 
 async function getActiveDirectorySession(sessionToken: unknown) {
@@ -441,23 +444,23 @@ Deno.serve(async (request) => {
     }
 
     if (action === "passkey-registration-options" || action === "passkey-registration-verify") {
-      const account = await getInvitedUser(request);
-      if (!account) {
-        return jsonResponse({ error: "Accept a valid directory invitation before registering a passkey." }, 401, requestOrigin);
+      const invitation = await getValidInvitation(getValue("invitation_token"));
+      if (!invitation) {
+        return jsonResponse({ error: "This invitation link is invalid, expired, or already used." }, 401, requestOrigin);
       }
       const { origin, rpID } = getWebAuthnContext(requestOrigin);
       if (action === "passkey-registration-options") {
         const { data: existingPasskeys, error: existingError } = await supabase
           .from("directory_passkeys")
           .select("credential_id, transports")
-          .eq("user_id", account.user_id);
+          .eq("user_id", invitation.user_id);
         if (existingError) throw existingError;
         const options = await generateRegistrationOptions({
           rpName: RP_NAME,
           rpID,
-          userID: new TextEncoder().encode(account.user_id),
-          userName: account.email,
-          userDisplayName: account.email,
+          userID: new TextEncoder().encode(invitation.user_id),
+          userName: invitation.email,
+          userDisplayName: invitation.email,
           attestationType: "none",
           authenticatorSelection: {
             residentKey: "required",
@@ -469,7 +472,8 @@ Deno.serve(async (request) => {
           })),
         });
         const challengeId = await storePasskeyChallenge(options.challenge, "registration", {
-          userId: account.user_id,
+          userId: invitation.user_id,
+          invitationId: invitation.invitationId,
         });
         return jsonResponse({ options, challenge_id: challengeId }, 200, requestOrigin);
       }
@@ -480,7 +484,8 @@ Deno.serve(async (request) => {
         return jsonResponse({ error: "The passkey registration response is invalid." }, 400, requestOrigin);
       }
       const challenge = await consumePasskeyChallenge(challengeId, "registration", {
-        userId: account.user_id,
+        userId: invitation.user_id,
+        invitationId: invitation.invitationId,
       });
       if (!challenge || typeof challenge.challenge !== "string") {
         return jsonResponse({ error: "This passkey request expired. Please try again." }, 401, requestOrigin);
@@ -503,10 +508,23 @@ Deno.serve(async (request) => {
         return jsonResponse({ error: "The passkey could not be verified. Please try again." }, 400, requestOrigin);
       }
 
+      const { data: usedInvitation, error: invitationError } = await supabase
+        .from("directory_invitations")
+        .update({ used_at: new Date().toISOString() })
+        .eq("id", invitation.invitationId)
+        .is("used_at", null)
+        .gt("expires_at", new Date().toISOString())
+        .select("id")
+        .maybeSingle();
+      if (invitationError) throw invitationError;
+      if (!usedInvitation) {
+        return jsonResponse({ error: "This invitation link is invalid, expired, or already used." }, 401, requestOrigin);
+      }
+
       const credential = verification.registrationInfo.credential;
       const { error: insertError } = await supabase.from("directory_passkeys").insert({
         credential_id: credential.id,
-        user_id: account.user_id,
+        user_id: invitation.user_id,
         public_key: encodeBase64Url(credential.publicKey),
         counter: credential.counter,
         transports: credential.transports || [],
@@ -581,25 +599,46 @@ Deno.serve(async (request) => {
       const email = emailValue.trim().toLowerCase();
       const { data: existingAccount, error: existingError } = await supabase
         .from("directory_accounts")
-        .select("user_id")
+        .select("user_id, is_active")
         .eq("email", email)
         .maybeSingle();
       if (existingError) throw existingError;
-      if (existingAccount) {
-        return jsonResponse({ error: "That email already has a directory account." }, 409, requestOrigin);
+      if (existingAccount && !existingAccount.is_active) {
+        return jsonResponse({ error: "That directory account is disabled." }, 409, requestOrigin);
       }
-      const { data: invitation, error: invitationError } = await supabase.auth.admin.inviteUserByEmail(
-        email,
-        { redirectTo: SITE_ORIGIN },
-      );
+      let userId = existingAccount?.user_id;
+      if (!userId) {
+        const { data: newAccount, error: accountError } = await supabase
+          .from("directory_accounts")
+          .insert({ email })
+          .select("user_id")
+          .single();
+        if (accountError) throw accountError;
+        userId = newAccount.user_id;
+      }
+
+      const invitationCreatedAt = new Date();
+      const invitationTimestamp = invitationCreatedAt.toISOString();
+      const { error: revokeError } = await supabase
+        .from("directory_invitations")
+        .update({ used_at: invitationTimestamp })
+        .eq("user_id", userId)
+        .is("used_at", null)
+        .gt("expires_at", invitationTimestamp);
+      if (revokeError) throw revokeError;
+
+      const invitationToken = encodeBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+      const { error: invitationError } = await supabase
+        .from("directory_invitations")
+        .insert({
+          user_id: userId,
+          token_hash: await sha256Hex(invitationToken),
+          expires_at: new Date(invitationCreatedAt.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          created_by: activeSession.user_id,
+        });
       if (invitationError) throw invitationError;
-      if (!invitation.user) throw new Error("Supabase did not return the invited user.");
-      const { error: accountError } = await supabase.from("directory_accounts").insert({
-        user_id: invitation.user.id,
-        email,
-      });
-      if (accountError) throw accountError;
-      return jsonResponse({ ok: true }, 200, requestOrigin);
+      const invitationUrl = `${SITE_ORIGIN.replace(/\/+$/, "")}/#invite=${invitationToken}`;
+      return jsonResponse({ ok: true, invitation_url: invitationUrl }, 200, requestOrigin);
     }
 
     if (action === "verify-editor") {

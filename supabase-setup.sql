@@ -1,13 +1,34 @@
--- Pursue directory setup: shared password plus per-member passkeys.
--- Run this in Supabase Dashboard > SQL Editor before deploying the Edge Function.
--- In Authentication > URL Configuration, set the Site URL to
--- https://pursuedirectory-leaders.onrender.com and allow that URL as a redirect.
--- Configure a production email provider so directory editors can invite members.
+-- PURSUE DIRECTORY: DETAILED SETUP
 --
--- This creates a password HASH table; the raw shared password is never stored
--- or exposed to the browser. After running this script, set the password using
--- the SQL statement in the comments below (replace the placeholder with a new,
--- strong password first):
+-- Follow these steps in order. This setup uses manually shared, one-time
+-- invitation links, so you do not need an email provider, SMTP, or Supabase
+-- Auth email/redirect settings.
+--
+-- Before starting:
+--   * Make sure you have access to the Supabase project with ref
+--     bvstmtteutzfwqdiovrm and to the Git branch that deploys the Render site.
+--   * Do not paste passwords, service-role keys, or invitation links into
+--     source files, commits, screenshots, or public messages.
+--
+-- STEP 1 - Create/update the database objects
+--   1. Open https://supabase.com/dashboard and select project
+--      bvstmtteutzfwqdiovrm.
+--   2. Open SQL Editor and choose New query.
+--   3. Copy the entire contents of this file into the query editor and click
+--      Run. Wait for the query to finish and check the Results panel for errors.
+--      Running this script again is safe for the included table/column setup;
+--      it does not set or reveal either password.
+--
+-- STEP 2 - Set the directory and editor passwords
+--   1. Copy the password SQL example below into a separate SQL Editor query,
+--      removing the leading "--" comment markers from every SQL line.
+--   2. Replace both placeholders with two different, strong passwords, then
+--      run that query. The database stores password hashes, not the raw values.
+--   3. Save both passwords securely. Members use the directory password when
+--      signing in; editors also use the editor password for editing/inviting.
+--      Running the example again changes both passwords for everyone.
+--   If a password contains a single quote, double that quote inside the SQL
+--   literal, for example O'Hare must be written as O''Hare.
 --
 -- insert into public.directory_settings (id, password_hash, edit_password_hash)
 -- values (
@@ -20,26 +41,67 @@
 --       edit_password_hash = excluded.edit_password_hash,
 --       updated_at = now();
 --
--- To rotate only the editor password later:
+-- To change only the editor password later, run this separately after replacing
+-- the placeholder with the new editor password:
 -- update public.directory_settings
 -- set edit_password_hash = extensions.crypt('<NEW EDITOR PASSWORD>', extensions.gen_salt('bf', 12)),
 --     updated_at = now()
 -- where id = true;
 --
--- Do not put a Supabase secret/service-role key or the shared password in the
--- website source. Configure SUPABASE_SERVICE_ROLE_KEY as an Edge Function
--- secret instead.
+-- STEP 3 - Configure and deploy the Edge Function
+--   1. Install the Supabase CLI using Supabase's official Windows instructions.
+--   2. Open PowerShell in the repository root and sign in:
+--        supabase login
+--   3. Link this checkout to the project (the project ref is shown above):
+--        supabase link --project-ref bvstmtteutzfwqdiovrm
+--   4. In the Supabase Dashboard, open Edge Functions > Secrets (or the
+--      equivalent secrets page in Project Settings) and add
+--      SUPABASE_SERVICE_ROLE_KEY with the project's current
+--      service-role/secret key. If a key was previously exposed, rotate it
+--      before saving the replacement. Never put this key in app.js or commit it.
+--   5. From the repository root, deploy the function:
+--        supabase functions deploy pursue-directory
+--      SUPABASE_URL is provided automatically by Supabase. APP_ORIGIN defaults
+--      to https://pursuedirectory-leaders.onrender.com; if you set it yourself,
+--      use that exact origin with no trailing slash.
 --
--- Deploy from the repository root after installing the Supabase CLI and linking
--- this project. Use a newly rotated service-role key; the previously shared
--- secret should be considered compromised:
---   supabase link --project-ref bvstmtteutzfwqdiovrm
---   supabase secrets set SUPABASE_SERVICE_ROLE_KEY=<NEW_SERVICE_ROLE_KEY>
---   supabase functions deploy pursue-directory
+-- STEP 4 - Publish the website
+--   1. In app.js, SUPABASE_URL and SUPABASE_ANON_KEY must identify this same
+--      Supabase project. The publishable/anon key may be used in the website;
+--      never substitute the service-role key. If you use another Supabase
+--      project, also update the Supabase hostnames in index.html's Content
+--      Security Policy and preconnect link.
+--   2. If Render deploys from Git, commit and push the changed website files
+--      to the configured branch. Otherwise use your usual Render deployment
+--      method. Wait for the deployment to finish.
+--   3. Confirm the site opens at
+--      https://pursuedirectory-leaders.onrender.com before creating the first
+--      invitation.
 --
--- SUPABASE_URL is provided automatically in the Edge Function environment.
--- Replace SUPABASE_ANON_KEY in index.html with the matching project's valid
--- publishable key before using the website.
+-- STEP 5 - Create the first administrator's setup link
+--   1. Copy the bootstrap query below into a new SQL Editor query, removing
+--      the leading "--" comment markers from every SQL line.
+--   2. Replace <FIRST_ADMIN_EMAIL> with the administrator's real email address.
+--      Keep the surrounding single quotes and run only this query.
+--   3. Copy the invitation_link returned in Results and send it privately to
+--      that person. The link expires in seven days and can be used once.
+--   4. The recipient opens the link on the device/browser where they want their
+--      passkey, registers it, then signs in with their email, directory password,
+--      and passkey.
+--
+-- STEP 6 - Invite additional members
+--   After the first administrator signs in, open the directory's member
+--   management area, enter a member's email, and choose Create invite link.
+--   Copy the link and share it privately. Creating a replacement link revokes
+--   that member's previous unused link. No email is sent automatically.
+--
+-- To revoke a member's access, delete their row from public.directory_accounts
+-- using their email in the SQL Editor. This also removes their passkeys,
+-- invitations, and sessions; this action cannot be undone.
+-- Example (replace the placeholder, remove the leading "--", then run):
+-- delete from public.directory_accounts
+-- where email = lower('<MEMBER_EMAIL>');
+--
 
 create extension if not exists pgcrypto with schema extensions;
 
@@ -64,23 +126,17 @@ alter table public.directory_settings
   ]::text[];
 
 create table if not exists public.directory_accounts (
-  user_id uuid primary key references auth.users (id) on delete cascade,
+  user_id uuid primary key default gen_random_uuid(),
   email text not null unique,
   is_active boolean not null default true,
   created_at timestamptz not null default now()
 );
 
--- Bootstrap the first directory account after running this script:
--- 1. Invite the first administrator from Authentication > Users in Supabase.
--- 2. Run the following, replacing the email with that invited address:
--- insert into public.directory_accounts (user_id, email)
--- select id, lower(email) from auth.users
--- where lower(email) = lower('<FIRST_ADMIN_EMAIL>')
--- on conflict (user_id) do nothing;
--- After that person registers a passkey and signs in, editors can invite others
--- from the directory's member-management screen.
--- To revoke a member's access later, delete that user under Authentication > Users;
--- their directory account, passkeys, and server sessions are removed automatically.
+alter table public.directory_accounts
+  drop constraint if exists directory_accounts_user_id_fkey;
+
+alter table public.directory_accounts
+  alter column user_id set default gen_random_uuid();
 
 create table if not exists public.directory_passkeys (
   credential_id text primary key,
@@ -94,14 +150,55 @@ create table if not exists public.directory_passkeys (
 create index if not exists directory_passkeys_user_id_idx
   on public.directory_passkeys (user_id);
 
+create table if not exists public.directory_invitations (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.directory_accounts (user_id) on delete cascade,
+  token_hash text not null unique,
+  expires_at timestamptz not null,
+  used_at timestamptz,
+  created_by uuid references public.directory_accounts (user_id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+-- Bootstrap the first directory account after running this script. Replace the
+-- email, run this query, and privately share the returned link with that person:
+-- with new_account as (
+--   insert into public.directory_accounts (email)
+--   values (lower('<FIRST_ADMIN_EMAIL>'))
+--   on conflict (email) do update set is_active = true
+--   returning user_id
+-- ),
+-- new_token as (
+--   select encode(extensions.gen_random_bytes(32), 'hex') as token
+-- ),
+-- new_invitation as (
+--   insert into public.directory_invitations (user_id, token_hash, expires_at)
+--   select new_account.user_id,
+--          encode(extensions.digest(new_token.token, 'sha256'), 'hex'),
+--          now() + interval '7 days'
+--   from new_account cross join new_token
+--   returning id
+-- )
+-- select 'https://pursuedirectory-leaders.onrender.com/#invite=' || new_token.token
+--   as invitation_link
+-- from new_token cross join new_invitation;
+-- After that person registers a passkey and signs in, editors can invite others
+-- from the directory's member-management screen.
+-- To revoke access, delete their row from public.directory_accounts; their
+-- passkeys, invitations, and sessions are removed automatically.
+
 create table if not exists public.directory_passkey_challenges (
   id uuid primary key default gen_random_uuid(),
   challenge text not null,
   challenge_type text not null check (challenge_type in ('registration', 'authentication')),
   user_id uuid references public.directory_accounts (user_id) on delete cascade,
+  invitation_id uuid references public.directory_invitations (id) on delete cascade,
   email text,
   expires_at timestamptz not null
 );
+
+alter table public.directory_passkey_challenges
+  add column if not exists invitation_id uuid references public.directory_invitations (id) on delete cascade;
 
 create table if not exists public.directory_sessions (
   token_hash text primary key,
@@ -112,15 +209,18 @@ create table if not exists public.directory_sessions (
 
 alter table public.directory_accounts enable row level security;
 alter table public.directory_passkeys enable row level security;
+alter table public.directory_invitations enable row level security;
 alter table public.directory_passkey_challenges enable row level security;
 alter table public.directory_sessions enable row level security;
 
 revoke all on public.directory_accounts from anon, authenticated;
 revoke all on public.directory_passkeys from anon, authenticated;
+revoke all on public.directory_invitations from anon, authenticated;
 revoke all on public.directory_passkey_challenges from anon, authenticated;
 revoke all on public.directory_sessions from anon, authenticated;
 grant all on public.directory_accounts to service_role;
 grant all on public.directory_passkeys to service_role;
+grant all on public.directory_invitations to service_role;
 grant all on public.directory_passkey_challenges to service_role;
 grant all on public.directory_sessions to service_role;
 

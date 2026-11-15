@@ -141,6 +141,9 @@
     const inviteMemberForm = document.querySelector("#invite-member-form");
     const inviteMemberButton = document.querySelector("#invite-member-button");
     const inviteMemberStatus = document.querySelector("#invite-member-status");
+    const inviteLinkPanel = document.querySelector("#invite-link-panel");
+    const inviteLinkOutput = document.querySelector("#invite-link-output");
+    const copyInviteLinkButton = document.querySelector("#copy-invite-link-button");
     const editPasswordForm = document.querySelector("#edit-password-form");
     const editUnlockButton = document.querySelector("#edit-unlock-button");
     const editorPasswordInput = document.querySelector("#edit-password");
@@ -228,6 +231,7 @@
     let activePassword = "";
     let activeEmail = "";
     let activeSessionToken = "";
+    let pendingInvitationToken = "";
     let activeEditorPassword = "";
     let isEditing = false;
     let editUnlocked = false;
@@ -1834,42 +1838,39 @@
     }
 
     // Auth & Form Handlers
-    async function registerPasskey(accessToken) {
+    async function registerPasskey() {
       if (!window.SimpleWebAuthnBrowser
         || typeof window.SimpleWebAuthnBrowser.startRegistration !== "function") {
         throw new Error("Passkeys are not supported by this browser.");
+      }
+      if (!pendingInvitationToken) {
+        throw new Error("Open a valid one-time invitation link to register a passkey.");
       }
 
       const { options, challenge_id: challengeId } = await callDirectory("passkey-registration-options", {
         password: "",
         sessionToken: "",
-        accessToken,
+        fields: { invitation_token: pendingInvitationToken },
       });
       const credential = await window.SimpleWebAuthnBrowser.startRegistration({ optionsJSON: options });
       await callDirectory("passkey-registration-verify", {
         password: "",
         sessionToken: "",
-        accessToken,
-        fields: { challenge_id: challengeId, credential },
+        fields: {
+          invitation_token: pendingInvitationToken,
+          challenge_id: challengeId,
+          credential,
+        },
       });
       passkeyEnrollmentPanel.hidden = true;
-      const { error } = await storageClient.auth.signOut();
-      if (error) {
-        console.warn("Passkey was registered, but the invitation session could not be cleared:", error);
-        showToast("Passkey registered. Close this tab to finish signing out of the invitation.", "info");
-      } else {
-        showToast("Passkey registered. You can now sign in with your email and directory password.", "success");
-      }
+      pendingInvitationToken = "";
+      showToast("Passkey registered. You can now sign in with your email and directory password.", "success");
     }
 
     registerPasskeyButton.addEventListener("click", async () => {
       registerPasskeyButton.disabled = true;
       try {
-        if (!storageClient) throw new Error("The sign-in service is unavailable.");
-        const { data, error } = await storageClient.auth.getSession();
-        if (error) throw error;
-        if (!data.session) throw new Error("Open the invitation email link again to register your passkey.");
-        await registerPasskey(data.session.access_token);
+        await registerPasskey();
       } catch (err) {
         showToast(`Passkey setup failed: ${err.message}`, "error");
       } finally {
@@ -1881,20 +1882,28 @@
       event.preventDefault();
       inviteMemberButton.disabled = true;
       inviteMemberStatus.textContent = "";
+      inviteLinkPanel.hidden = true;
+      inviteLinkOutput.value = "";
       try {
         const formData = new FormData(inviteMemberForm);
         const email = String(formData.get("email") || "").trim().toLowerCase();
-        await callDirectory("invite-member", {
+        const { invitation_url: invitationUrl } = await callDirectory("invite-member", {
           editorPassword: activeEditorPassword,
           fields: { email },
         });
-        inviteMemberStatus.textContent = `Invitation sent to ${email}.`;
+        inviteLinkOutput.value = invitationUrl;
+        inviteLinkPanel.hidden = false;
+        inviteMemberStatus.textContent = `One-time setup link created for ${email}. Copy it and share it privately; it expires in seven days.`;
         inviteMemberForm.reset();
       } catch (err) {
-        inviteMemberStatus.textContent = `Invitation failed: ${err.message}`;
+        inviteMemberStatus.textContent = `Could not create invite link: ${err.message}`;
       } finally {
         inviteMemberButton.disabled = false;
       }
+    });
+
+    copyInviteLinkButton.addEventListener("click", async () => {
+      await copyToClipboard(inviteLinkOutput.value, copyInviteLinkButton);
     });
 
     signInForm.addEventListener("submit", async (event) => {
@@ -2104,13 +2113,13 @@
 
     // Initial session recovery & offline-first startup
     (async function restoreSession() {
-      if (storageClient) {
-        const { data: authData, error: authError } = await storageClient.auth.getSession();
-        if (authError) {
-          console.warn("Could not check for a pending account invitation:", authError);
-        } else if (authData.session) {
-          passkeyEnrollmentPanel.hidden = false;
-        }
+      const invitationParams = new URLSearchParams(window.location.hash.slice(1));
+      const invitationToken = invitationParams.get("invite");
+      if (invitationToken) {
+        pendingInvitationToken = invitationToken;
+        passkeyEnrollmentPanel.hidden = false;
+        clearSession();
+        window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
       }
 
       // Pre-populate "Remember me" checkbox if device is remembered

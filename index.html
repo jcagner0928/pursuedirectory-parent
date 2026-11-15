@@ -92,7 +92,7 @@
       <h2 id="sign-in-heading">Pursue member access</h2>
       <p class="hint" style="margin-bottom: 20px;">Sign in with your invited email, the shared directory password, and your passkey.</p>
       <div id="passkey-enrollment-panel" hidden>
-        <p class="hint">Your invitation is ready. Register a passkey for this account before signing in.</p>
+        <p class="hint">Your one-time invitation is ready. Register a passkey for this account before it expires.</p>
         <button class="submit-button" id="register-passkey-button" type="button">Register passkey</button>
       </div>
       <form id="sign-in-form" class="auth-form">
@@ -192,14 +192,19 @@
         <section class="import-roster-tools" aria-labelledby="invite-member-heading">
           <div>
             <h3 id="invite-member-heading" style="margin: 0 0 4px;">Invite a directory member</h3>
-            <p class="hint">Send an invitation to an individual email address. They must accept it and register a passkey before they can sign in.</p>
+            <p class="hint">Create a one-time passkey setup link for an individual email address, then share it privately. Links expire after seven days.</p>
           </div>
           <form id="invite-member-form" class="import-roster-actions">
             <label for="invite-member-email">Member email address</label>
             <input id="invite-member-email" name="email" type="email" autocomplete="email" required maxlength="320" placeholder="member@example.com">
-            <button class="secondary-button" id="invite-member-button" type="submit">Send invitation</button>
+            <button class="secondary-button" id="invite-member-button" type="submit">Create invite link</button>
             <p id="invite-member-status" class="import-roster-status" aria-live="polite"></p>
           </form>
+          <div id="invite-link-panel" class="import-roster-actions" hidden>
+            <label for="invite-link-output">One-time link (share privately)</label>
+            <input id="invite-link-output" type="url" readonly>
+            <button class="secondary-button" id="copy-invite-link-button" type="button">Copy link</button>
+          </div>
         </section>
         <form id="person-form">
           <div class="form-grid">
