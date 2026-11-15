@@ -1939,9 +1939,9 @@
         activeSessionToken = sessionToken;
         await saveSession(activeEmail, activePassword, activeSessionToken, "");
         signInForm.reset();
+        await loadPeople();
         setSignedInState(true);
         showToast("Welcome to the Pursue directory!", "success");
-        await loadPeople();
       } catch (err) {
         activePassword = "";
         activeEmail = "";
@@ -2160,8 +2160,8 @@
               editUnlocked = false;
             }
           }
-          setSignedInState(true);
           await loadPeople();
+          setSignedInState(true);
         } catch (err) {
           // Only activate the offline view when the browser is actually offline.
           if (!navigator.onLine) {
