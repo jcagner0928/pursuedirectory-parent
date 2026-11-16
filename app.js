@@ -173,6 +173,7 @@
     const exportCsvBtn = document.querySelector("#export-csv-btn");
     const rosterFileInput = document.querySelector("#roster-file-input");
     const rosterFileButton = document.querySelector("#roster-file-button");
+    const rosterTemplateButton = document.querySelector("#roster-template-button");
     const rosterImportStatus = document.querySelector("#roster-import-status");
 
     // Teams & Emergency Contact Form Elements
@@ -628,12 +629,13 @@
       return `"${str.replace(/"/g, '""')}"`;
     }
 
+    const directoryCsvHeaders = ["Name", "Grade", "Roles", "Teams", "Email", "Phone", "Emergency Contact", "Emergency Phone", "Emergency Relationship"];
+
     function exportDirectoryCSV() {
       if (!allPeople.length) {
         showToast("No members to export", "info");
         return;
       }
-      const headers = ["Name", "Grade", "Roles", "Teams", "Email", "Phone", "Emergency Contact", "Emergency Phone", "Emergency Relationship"];
       const rows = allPeople.map((p) => [
         sanitizeCsvCell(p.name),
         sanitizeCsvCell(p.grade),
@@ -645,7 +647,7 @@
         sanitizeCsvCell(p.emergency_contact_phone),
         sanitizeCsvCell(p.emergency_contact_relationship)
       ]);
-      const csv = [headers.join(","), ...rows.map((r) => r.join(","))].join("\r\n");
+      const csv = [directoryCsvHeaders.join(","), ...rows.map((r) => r.join(","))].join("\r\n");
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -898,6 +900,18 @@
     }
 
     rosterFileButton.addEventListener("click", () => rosterFileInput.click());
+    rosterTemplateButton.addEventListener("click", () => {
+      const blob = new Blob([directoryCsvHeaders.join(",") + "\r\n"], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "pursue_directory_import_template.csv";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      showToast("CSV import template downloaded", "success");
+    });
     rosterFileInput.addEventListener("change", async () => {
       const file = rosterFileInput.files[0];
       if (!file) return;
