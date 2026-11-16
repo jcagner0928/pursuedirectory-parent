@@ -207,6 +207,17 @@
             <button class="secondary-button" id="copy-invite-link-button" type="button">Copy link</button>
           </div>
         </section>
+        <section class="import-roster-tools" aria-labelledby="activity-history-heading">
+          <div class="directory-heading-row">
+            <div>
+              <h3 id="activity-history-heading" style="margin: 0 0 4px;">Activity history</h3>
+              <p class="hint">Editor-only history is kept for one month. Deleted profiles can be restored during that time.</p>
+            </div>
+            <button class="secondary-button" id="refresh-history-button" type="button">Refresh history</button>
+          </div>
+          <p id="history-status" class="import-roster-status" aria-live="polite"></p>
+          <div id="history-list" class="history-list" aria-live="polite"></div>
+        </section>
         <form id="person-form">
           <div class="form-grid">
             <div class="field">
@@ -520,7 +531,7 @@
   <div class="modal-backdrop" id="delete-modal" hidden role="dialog" aria-modal="true">
     <div class="confirm-modal-box">
       <h3>Delete member</h3>
-      <p id="delete-modal-text">Are you sure you want to remove this person from the Pursue directory? This cannot be undone.</p>
+      <p id="delete-modal-text">Remove this person from the directory? Editors can restore the profile from Activity history for one month.</p>
       <div class="confirm-modal-actions">
         <button type="button" class="secondary-button" id="delete-cancel-btn">Cancel</button>
         <button type="button" class="submit-button danger-button" id="delete-confirm-btn">Delete member</button>

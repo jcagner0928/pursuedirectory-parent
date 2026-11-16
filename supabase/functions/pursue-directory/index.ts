@@ -230,6 +230,115 @@ async function getActiveDirectorySession(sessionToken: unknown) {
   return account ? { ...account, tokenHash } : null;
 }
 
+type PeopleHistoryEntry = {
+  action: "added" | "updated" | "deleted" | "restored";
+  person: Record<string, unknown>;
+  actorEmail: string;
+  beforeData?: Record<string, unknown> | null;
+  afterData?: Record<string, unknown> | null;
+};
+
+async function recordPeopleHistoryEntries(entries: PeopleHistoryEntry[]) {
+  const { error } = await supabase.from("directory_people_history").insert(entries.map((entry) => ({
+    person_id: entry.person.id,
+    person_name: entry.person.name,
+    action: entry.action,
+    actor_email: entry.actorEmail,
+    before_data: entry.beforeData || null,
+    after_data: entry.afterData || null,
+  })));
+  if (error) throw error;
+}
+
+async function recordPeopleHistory(
+  action: PeopleHistoryEntry["action"],
+  person: Record<string, unknown>,
+  actorEmail: string,
+  beforeData: Record<string, unknown> | null = null,
+  afterData: Record<string, unknown> | null = null,
+) {
+  await recordPeopleHistoryEntries([{ action, person, actorEmail, beforeData, afterData }]);
+}
+
+async function purgeExpiredPerson(personId: string) {
+  const { data: person, error: personError } = await supabase
+    .from("people")
+    .select("id, photo_path")
+    .eq("id", personId)
+    .not("deleted_at", "is", null)
+    .maybeSingle();
+  if (personError) throw personError;
+  if (!person) return;
+
+  if (typeof person.photo_path === "string" && person.photo_path) {
+    const { data: remainingReferences, error: referenceError } = await supabase
+      .from("people")
+      .select("id")
+      .eq("photo_path", person.photo_path)
+      .neq("id", personId)
+      .limit(1);
+    if (referenceError) throw referenceError;
+    if (!remainingReferences?.length) {
+      const { error: photoError } = await supabase.storage.from(bucket).remove([person.photo_path]);
+      if (photoError) throw photoError;
+    }
+  }
+
+  const { error: deleteError } = await supabase
+    .from("people")
+    .delete()
+    .eq("id", personId)
+    .not("deleted_at", "is", null);
+  if (deleteError) throw deleteError;
+}
+
+async function cleanupExpiredPeopleHistory() {
+  const now = new Date().toISOString();
+  const { data: expiredEntries, error: expiredHistoryError } = await supabase
+    .from("directory_people_history")
+    .select("person_id, action")
+    .lt("expires_at", now);
+  if (expiredHistoryError) throw expiredHistoryError;
+
+  const expiredDeleteIds = new Set(
+    (expiredEntries || [])
+      .filter((entry) => entry.action === "deleted")
+      .map((entry) => entry.person_id),
+  );
+  for (const personId of expiredDeleteIds) {
+    const { data: latestEntry, error: latestEntryError } = await supabase
+      .from("directory_people_history")
+      .select("action, expires_at")
+      .eq("person_id", personId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (latestEntryError) throw latestEntryError;
+    if (latestEntry?.action !== "deleted" || latestEntry.expires_at >= now) continue;
+
+    await purgeExpiredPerson(personId);
+  }
+
+  const { error: historyError } = await supabase
+    .from("directory_people_history")
+    .delete()
+    .lt("expires_at", now);
+  if (historyError) throw historyError;
+
+  const purgeBefore = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+  const { data: overduePeople, error: overduePeopleError } = await supabase
+    .from("people")
+    .select("id, photo_path")
+    .not("deleted_at", "is", null)
+    .lt("deleted_at", purgeBefore);
+  if (overduePeopleError) throw overduePeopleError;
+  if (overduePeople?.length) {
+    for (const person of overduePeople) {
+      await purgeExpiredPerson(person.id);
+    }
+  }
+}
+
 function validEmail(value: unknown): value is string {
   return typeof value === "string"
     && value.length <= 320
@@ -556,7 +665,18 @@ Deno.serve(async (request) => {
       return jsonResponse({ error: "Your sign-in expired. Please sign in with your passkey again." }, 401, requestOrigin);
     }
 
-    const editorActions = new Set(["verify-editor", "invite-member", "prepare-upload", "add", "batch-add", "update", "delete", "update-teams"]);
+    const editorActions = new Set([
+      "verify-editor",
+      "invite-member",
+      "prepare-upload",
+      "add",
+      "batch-add",
+      "update",
+      "delete",
+      "update-teams",
+      "list-history",
+      "restore-person",
+    ]);
     if (editorActions.has(action)) {
       const editorPassword = getValue("editor_password");
       if (typeof editorPassword !== "string" || editorPassword.length < 1 || editorPassword.length > 256) {
@@ -730,6 +850,7 @@ Deno.serve(async (request) => {
     }
 
     if (action === "list") {
+      await cleanupExpiredPeopleHistory();
       const baseColumns = "id, name, email, phone, grade, roles, photo_path, created_at";
       const emergencyColumns = `${baseColumns}, emergency_contact_name, emergency_contact_phone, emergency_contact_relationship`;
       const teamColumns = `${baseColumns}, teams`;
@@ -738,6 +859,7 @@ Deno.serve(async (request) => {
       let peopleResult = await supabase
         .from("people")
         .select(fullColumns)
+        .is("deleted_at", null)
         .order("name", { ascending: true });
 
       if (peopleResult.error && (peopleResult.error.message.includes("does not exist") || peopleResult.error.message.includes("column"))) {
@@ -745,6 +867,7 @@ Deno.serve(async (request) => {
         peopleResult = await supabase
           .from("people")
           .select(emergencyColumns)
+          .is("deleted_at", null)
           .order("name", { ascending: true });
 
         if (peopleResult.error && (peopleResult.error.message.includes("does not exist") || peopleResult.error.message.includes("column"))) {
@@ -752,6 +875,7 @@ Deno.serve(async (request) => {
           peopleResult = await supabase
             .from("people")
             .select(teamColumns)
+            .is("deleted_at", null)
             .order("name", { ascending: true });
         }
 
@@ -760,6 +884,7 @@ Deno.serve(async (request) => {
           peopleResult = await supabase
             .from("people")
             .select(baseColumns)
+            .is("deleted_at", null)
             .order("name", { ascending: true });
         }
       }
@@ -805,6 +930,53 @@ Deno.serve(async (request) => {
           photo_url: typeof person.photo_path === "string" && person.photo_path ? signedUrls.get(person.photo_path) ?? null : null,
         })),
       }, 200, requestOrigin);
+    }
+
+    if (action === "list-history") {
+      await cleanupExpiredPeopleHistory();
+      const { data: entries, error } = await supabase
+        .from("directory_people_history")
+        .select("id, person_id, person_name, action, actor_email, before_data, after_data, created_at, expires_at")
+        .gt("expires_at", new Date().toISOString())
+        .order("created_at", { ascending: false })
+        .limit(200);
+      if (error) throw error;
+      return jsonResponse({ entries: entries || [] }, 200, requestOrigin);
+    }
+
+    if (action === "restore-person") {
+      const idValue = getValue("id");
+      if (typeof idValue !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idValue)) {
+        return jsonResponse({ error: "A valid deleted directory entry is required." }, 400, requestOrigin);
+      }
+
+      const { data: latestHistory, error: historyError } = await supabase
+        .from("directory_people_history")
+        .select("action")
+        .eq("person_id", idValue)
+        .gt("expires_at", new Date().toISOString())
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (historyError) throw historyError;
+      if (latestHistory?.action !== "deleted") {
+        return jsonResponse({ error: "This entry is no longer available to restore." }, 404, requestOrigin);
+      }
+
+      const { data: person, error } = await supabase
+        .from("people")
+        .update({ deleted_at: null })
+        .eq("id", idValue)
+        .not("deleted_at", "is", null)
+        .select("*")
+        .maybeSingle();
+      if (error) throw error;
+      if (!person) {
+        return jsonResponse({ error: "This entry is no longer available to restore." }, 404, requestOrigin);
+      }
+
+      await recordPeopleHistory("restored", person, activeSession.email, null, person);
+      return jsonResponse({ ok: true }, 200, requestOrigin);
     }
 
     if (action === "add") {
@@ -900,7 +1072,11 @@ Deno.serve(async (request) => {
         emergency_contact_relationship: emergencyContactRel,
       };
 
-      let { error: insertError } = await supabase.from("people").insert(insertPayload);
+      let { data: insertedPerson, error: insertError } = await supabase
+        .from("people")
+        .insert(insertPayload)
+        .select("*")
+        .single();
       if (insertError && (insertError.message.includes("column") || insertError.message.includes("does not exist"))) {
         console.warn("Retrying insert without extended columns:", insertError.message);
         const fallbackPayload = {
@@ -911,7 +1087,8 @@ Deno.serve(async (request) => {
           roles,
           photo_path: photoPath,
         };
-        const retryResult = await supabase.from("people").insert(fallbackPayload);
+        const retryResult = await supabase.from("people").insert(fallbackPayload).select("*").single();
+        insertedPerson = retryResult.data;
         insertError = retryResult.error;
       }
 
@@ -924,11 +1101,13 @@ Deno.serve(async (request) => {
         }
         throw insertError;
       }
+      if (!insertedPerson) throw new Error("The new profile could not be recorded in activity history.");
 
       if (cleanTeams.length) {
         await syncTeams(cleanTeams);
       }
 
+      await recordPeopleHistory("added", insertedPerson, activeSession.email, null, insertedPerson);
       return jsonResponse({ ok: true });
     }
 
@@ -1017,7 +1196,10 @@ Deno.serve(async (request) => {
         });
       }
 
-      let { error: insertError } = await supabase.from("people").insert(validatedPeople);
+      let { data: insertedPeople, error: insertError } = await supabase
+        .from("people")
+        .insert(validatedPeople)
+        .select("*");
       if (insertError && (insertError.message.includes("column") || insertError.message.includes("does not exist"))) {
         console.warn("Retrying batch insert without optional extended columns:", insertError.message);
         const fallbackBatch = validatedPeople.map((p) => ({
@@ -1028,11 +1210,22 @@ Deno.serve(async (request) => {
           roles: p.roles,
           photo_path: null,
         }));
-        const retryResult = await supabase.from("people").insert(fallbackBatch);
+        const retryResult = await supabase.from("people").insert(fallbackBatch).select("*");
+        insertedPeople = retryResult.data;
         insertError = retryResult.error;
       }
 
       if (insertError) throw insertError;
+      if (!insertedPeople || insertedPeople.length !== validatedPeople.length) {
+        throw new Error("The imported profiles could not be recorded in activity history.");
+      }
+
+      await recordPeopleHistoryEntries(insertedPeople.map((person) => ({
+        action: "added" as const,
+        person,
+        actorEmail: activeSession.email,
+        afterData: person,
+      })));
 
       if (allBatchTeams.length) {
         await syncTeams(Array.from(new Set(allBatchTeams)));
@@ -1103,6 +1296,14 @@ Deno.serve(async (request) => {
 
       let newPhotoPath: string | null | undefined = undefined;
       let oldPhotoPathToDelete: string | null = null;
+      const { data: beforePerson, error: beforePersonError } = await supabase
+        .from("people")
+        .select("*")
+        .eq("id", idValue)
+        .is("deleted_at", null)
+        .maybeSingle();
+      if (beforePersonError) throw beforePersonError;
+      if (!beforePerson) return jsonResponse({ error: "Directory entry not found." }, 404, requestOrigin);
 
       if (photoAction === "remove") {
         newPhotoPath = null;
@@ -1132,13 +1333,8 @@ Deno.serve(async (request) => {
       }
 
       if (newPhotoPath !== undefined) {
-        const { data: existingPerson } = await supabase
-          .from("people")
-          .select("photo_path")
-          .eq("id", idValue)
-          .maybeSingle();
-        if (existingPerson?.photo_path) {
-          oldPhotoPathToDelete = existingPerson.photo_path;
+        if (beforePerson.photo_path) {
+          oldPhotoPathToDelete = beforePerson.photo_path;
         }
       }
 
@@ -1161,7 +1357,8 @@ Deno.serve(async (request) => {
         .from("people")
         .update(updatePayload)
         .eq("id", idValue)
-        .select("id")
+        .is("deleted_at", null)
+        .select("*")
         .maybeSingle();
 
       if (error && (error.message.includes("column") || error.message.includes("does not exist"))) {
@@ -1180,7 +1377,8 @@ Deno.serve(async (request) => {
           .from("people")
           .update(fallbackUpdate)
           .eq("id", idValue)
-          .select("id")
+          .is("deleted_at", null)
+          .select("*")
           .maybeSingle();
         data = retryResult.data;
         error = retryResult.error;
@@ -1193,6 +1391,8 @@ Deno.serve(async (request) => {
         throw error;
       }
       if (!data) return jsonResponse({ error: "Directory entry not found." }, 404, requestOrigin);
+
+      await recordPeopleHistory("updated", data, activeSession.email, beforePerson, data);
 
       if (oldPhotoPathToDelete && oldPhotoPathToDelete !== newPhotoPath) {
         await supabase.storage.from(bucket).remove([oldPhotoPathToDelete]);
@@ -1211,24 +1411,23 @@ Deno.serve(async (request) => {
         return jsonResponse({ error: "A valid directory entry is required." }, 400, requestOrigin);
       }
 
-      const { data, error } = await supabase
+      const { data: person, error } = await supabase
         .from("people")
-        .delete()
+        .update({ deleted_at: new Date().toISOString() })
         .eq("id", idValue)
-        .select("photo_path")
+        .is("deleted_at", null)
+        .select("*")
         .maybeSingle();
       if (error) throw error;
-      if (!data) return jsonResponse({ error: "Directory entry not found." }, 404, requestOrigin);
+      if (!person) return jsonResponse({ error: "Directory entry not found." }, 404, requestOrigin);
 
-      if (data.photo_path) {
-        const { error: cleanupError } = await supabase.storage.from(bucket).remove([data.photo_path]);
-        if (cleanupError) {
-          // Log server-side only; don't expose storage internals to the client.
-          console.error(`Could not clean up photo after delete: ${cleanupError.message}`);
-          throw new Error("The directory entry was deleted, but its picture could not be removed. Please contact an administrator.");
-        }
-      }
-
+      await recordPeopleHistory(
+        "deleted",
+        person,
+        activeSession.email,
+        { ...person, deleted_at: null },
+        null,
+      );
       return jsonResponse({ ok: true }, 200, requestOrigin);
     }
 

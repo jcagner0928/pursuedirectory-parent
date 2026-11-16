@@ -175,6 +175,9 @@
     const rosterFileButton = document.querySelector("#roster-file-button");
     const rosterTemplateButton = document.querySelector("#roster-template-button");
     const rosterImportStatus = document.querySelector("#roster-import-status");
+    const refreshHistoryButton = document.querySelector("#refresh-history-button");
+    const historyStatus = document.querySelector("#history-status");
+    const historyList = document.querySelector("#history-list");
 
     // Teams & Emergency Contact Form Elements
     const teamCheckboxesContainer = document.querySelector("#team-checkboxes-container");
@@ -881,6 +884,7 @@
         }
 
         await loadPeople();
+        await loadActivityHistory();
         const summary = `Imported ${imported} of ${people.length} members.` +
           (skipped ? ` Skipped ${skipped} invalid row${skipped === 1 ? "" : "s"}.` : "") +
           (failures.length ? `\nCould not import ${failures.length}: ${failures.slice(0, 3).join("; ")}` : "") +
@@ -1166,7 +1170,7 @@
       if (e) e.stopPropagation();
       previouslyFocusedElement = document.activeElement;
       pendingDeletePerson = person;
-      deleteModalText.textContent = `Are you sure you want to remove ${person.name} from the Pursue directory? This cannot be undone.`;
+      deleteModalText.textContent = `Remove ${person.name} from the directory? Editors can restore the profile from Activity history for one month.`;
       document.body.style.overflow = "hidden";
       deleteModal.hidden = false;
       deleteCancelBtn.focus();
@@ -1196,6 +1200,7 @@
         if (selectedPersonId === person.id) resetPersonForm();
         if (currentDetailPerson && currentDetailPerson.id === person.id) closeMemberModal();
         await loadPeople();
+        await loadActivityHistory();
       } catch (err) {
         showToast(`Could not delete ${person.name}: ${err.message}`, "error");
       } finally {
@@ -1920,6 +1925,117 @@
       await copyToClipboard(inviteLinkOutput.value, copyInviteLinkButton);
     });
 
+    function getHistoryChangeSummary(entry) {
+      if (entry.action !== "updated") return "";
+      const before = entry.before_data && typeof entry.before_data === "object" ? entry.before_data : {};
+      const after = entry.after_data && typeof entry.after_data === "object" ? entry.after_data : {};
+      const labels = {
+        name: "Name",
+        email: "Email",
+        phone: "Phone",
+        grade: "Grade",
+        roles: "Roles",
+        teams: "Teams",
+        photo_path: "Photo",
+        emergency_contact_name: "Emergency contact",
+        emergency_contact_phone: "Emergency phone",
+        emergency_contact_relationship: "Relationship",
+      };
+      const changedFields = Object.keys(labels).filter((key) =>
+        JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null)
+      );
+      return changedFields.length ? `Changed: ${changedFields.map((key) => labels[key]).join(", ")}` : "";
+    }
+
+    async function loadActivityHistory() {
+      refreshHistoryButton.disabled = true;
+      historyStatus.textContent = "Loading activity history...";
+      historyList.replaceChildren();
+
+      try {
+        const { entries } = await callDirectory("list-history", {
+          editorPassword: activeEditorPassword,
+        });
+        if (!Array.isArray(entries)) throw new Error("The activity history response was invalid.");
+
+        const latestActionByPerson = new Map();
+        for (const entry of entries) {
+          if (!latestActionByPerson.has(entry.person_id)) {
+            latestActionByPerson.set(entry.person_id, entry.action);
+          }
+        }
+
+        if (entries.length === 0) {
+          historyStatus.textContent = "No profile activity in the last month.";
+          return;
+        }
+        historyStatus.textContent = `Showing the ${entries.length} most recent profile changes from the last month.`;
+
+        const actionLabels = {
+          added: "Added",
+          updated: "Updated",
+          deleted: "Deleted",
+          restored: "Restored",
+        };
+        for (const entry of entries) {
+          const item = document.createElement("article");
+          item.className = "history-entry";
+
+          const details = document.createElement("div");
+          details.className = "history-entry-details";
+          const title = document.createElement("strong");
+          title.textContent = `${actionLabels[entry.action] || "Changed"}: ${entry.person_name}`;
+          details.appendChild(title);
+
+          const changedFields = getHistoryChangeSummary(entry);
+          if (changedFields) {
+            const summary = document.createElement("p");
+            summary.className = "hint";
+            summary.textContent = changedFields;
+            details.appendChild(summary);
+          }
+
+          const timestamp = new Date(entry.created_at);
+          const metadata = document.createElement("p");
+          metadata.className = "hint";
+          metadata.textContent = `${entry.actor_email} · ${Number.isNaN(timestamp.getTime()) ? "Time unavailable" : timestamp.toLocaleString()}`;
+          details.appendChild(metadata);
+          item.appendChild(details);
+
+          if (entry.action === "deleted" && latestActionByPerson.get(entry.person_id) === "deleted") {
+            const restoreButton = document.createElement("button");
+            restoreButton.className = "secondary-button";
+            restoreButton.type = "button";
+            restoreButton.textContent = "Restore";
+            restoreButton.addEventListener("click", async () => {
+              restoreButton.disabled = true;
+              try {
+                await callDirectory("restore-person", {
+                  editorPassword: activeEditorPassword,
+                  fields: { id: entry.person_id },
+                });
+                showToast(`${entry.person_name} was restored.`, "success");
+                await loadPeople();
+                await loadActivityHistory();
+              } catch (err) {
+                showToast(`Could not restore ${entry.person_name}: ${err.message}`, "error");
+                restoreButton.disabled = false;
+              }
+            });
+            item.appendChild(restoreButton);
+          }
+
+          historyList.appendChild(item);
+        }
+      } catch (err) {
+        historyStatus.textContent = `Could not load activity history: ${err.message}`;
+      } finally {
+        refreshHistoryButton.disabled = false;
+      }
+    }
+
+    refreshHistoryButton.addEventListener("click", loadActivityHistory);
+
     signInForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       signInButton.disabled = true;
@@ -2027,6 +2143,7 @@
         setSignedInState(Boolean(activePassword));
         showToast("Editor mode unlocked!", "success");
         await loadPeople();
+        await loadActivityHistory();
       } catch (err) {
         activeEditorPassword = "";
         showToast(`Editor access denied: ${err.message}`, "error");
@@ -2116,6 +2233,7 @@
 
         resetPersonForm();
         await loadPeople();
+        await loadActivityHistory();
       } catch (err) {
         showToast(`Could not save member: ${err.message}`, "error");
       } finally {

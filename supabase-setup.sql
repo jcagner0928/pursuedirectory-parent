@@ -18,6 +18,9 @@
 --      Run. Wait for the query to finish and check the Results panel for errors.
 --      Running this script again is safe for the included table/column setup;
 --      it does not set or reveal either password.
+--      Profile additions, edits, deletions, and restores are logged for one
+--      month. Deleted profiles and their photos are purged after that period
+--      the next time the directory is loaded.
 --
 -- STEP 2 - Set the directory and editor passwords
 --   1. Copy the password SQL example below into a separate SQL Editor query,
@@ -391,6 +394,11 @@ alter table public.people
   add column if not exists emergency_contact_relationship text;
 alter table public.people
   add column if not exists teams text[] default array[]::text[];
+alter table public.people
+  add column if not exists deleted_at timestamptz;
+create index if not exists people_deleted_at_idx
+  on public.people (deleted_at)
+  where deleted_at is not null;
 do $$
 begin
   if exists (
@@ -405,6 +413,29 @@ alter table public.people alter column created_by drop not null;
 alter table public.people enable row level security;
 revoke all on public.people from anon, authenticated;
 grant all on public.people to service_role;
+
+create table if not exists public.directory_people_history (
+  id uuid primary key default gen_random_uuid(),
+  person_id uuid not null,
+  person_name text not null,
+  action text not null check (action in ('added', 'updated', 'deleted', 'restored')),
+  actor_email text not null,
+  before_data jsonb,
+  after_data jsonb,
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null default (now() + interval '1 month')
+);
+
+create index if not exists directory_people_history_created_at_idx
+  on public.directory_people_history (created_at desc);
+create index if not exists directory_people_history_expires_at_idx
+  on public.directory_people_history (expires_at);
+create index if not exists directory_people_history_person_created_at_idx
+  on public.directory_people_history (person_id, created_at desc);
+
+alter table public.directory_people_history enable row level security;
+revoke all on public.directory_people_history from anon, authenticated;
+grant all on public.directory_people_history to service_role;
 
 drop policy if exists "Signed-in members can view people" on public.people;
 drop policy if exists "Members can add people" on public.people;
