@@ -204,6 +204,7 @@
     const modalTeamsVal = document.querySelector("#modal-teams-val");
     const modalEmergencyWrapper = document.querySelector("#modal-emergency-wrapper");
     const modalEmergencyNameRel = document.querySelector("#modal-emergency-name-rel");
+    const modalEmergencyPhoneRow = document.querySelector("#modal-emergency-phone-row");
     const modalEmergencyPhoneVal = document.querySelector("#modal-emergency-phone-val");
     const modalEmergencyCallBtn = document.querySelector("#modal-emergency-call-btn");
     const modalEmergencySmsBtn = document.querySelector("#modal-emergency-sms-btn");
@@ -1054,13 +1055,13 @@
 
         if (person.emergency_contact_phone) {
           modalEmergencyPhoneVal.textContent = person.emergency_contact_phone;
-          modalEmergencyPhoneVal.hidden = false;
+          modalEmergencyPhoneRow.hidden = false;
           modalEmergencyCallBtn.href = `tel:${person.emergency_contact_phone.replace(/[^\d+]/g, "")}`;
           modalEmergencyCallBtn.style.display = "inline-flex";
           modalEmergencySmsBtn.href = `sms:${person.emergency_contact_phone.replace(/[^\d+]/g, "")}`;
           modalEmergencySmsBtn.style.display = "inline-flex";
         } else {
-          modalEmergencyPhoneVal.hidden = true;
+          modalEmergencyPhoneRow.hidden = true;
           modalEmergencyCallBtn.style.display = "none";
           modalEmergencySmsBtn.style.display = "none";
         }

@@ -489,8 +489,11 @@
             <span>Emergency Contact</span>
           </div>
           <div class="modal-emergency-content">
-            <div style="font-weight: 700; color: var(--text-main);" id="modal-emergency-name-rel">-</div>
-            <div style="color: var(--text-muted); font-size: 0.88rem;" id="modal-emergency-phone-val">-</div>
+            <div class="modal-emergency-name" id="modal-emergency-name-rel">-</div>
+            <div class="modal-emergency-phone-row" id="modal-emergency-phone-row" hidden>
+              <span class="modal-emergency-phone-label">Phone</span>
+              <span class="modal-emergency-phone" id="modal-emergency-phone-val">-</span>
+            </div>
           </div>
           <div class="modal-emergency-actions">
             <a href="#" id="modal-emergency-call-btn">
