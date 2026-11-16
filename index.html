@@ -92,8 +92,8 @@
       <h2 id="sign-in-heading">Pursue member access</h2>
       <p class="hint" style="margin-bottom: 20px;">Sign in with your invited email, the shared directory password, and your passkey.</p>
       <div id="passkey-enrollment-panel" hidden>
-        <p class="hint">Your one-time invitation is ready. Register a passkey for this account before it expires.</p>
-        <button class="submit-button" id="register-passkey-button" type="button">Register passkey</button>
+        <p class="hint">Your one-time invitation is ready. Add a passkey for this account before it expires. Existing passkeys are not replaced.</p>
+        <button class="submit-button" id="register-passkey-button" type="button">Add passkey</button>
       </div>
       <form id="sign-in-form" class="auth-form">
         <div class="form-grid">
@@ -113,11 +113,6 @@
               </button>
             </div>
           </div>
-        </div>
-        <div style="margin-top: 14px;">
-          <label style="display: inline-flex; align-items: center; gap: 8px; font-size: 0.86rem; color: var(--text-muted); cursor: pointer;">
-            <input type="checkbox" id="remember-device-checkbox" style="accent-color: var(--accent);"> Remember sign-in on this device
-          </label>
         </div>
         <div class="form-footer">
           <button class="submit-button" id="sign-in-button" type="submit">Sign in with passkey</button>
@@ -140,6 +135,7 @@
         </span>
       </div>
       <div class="account-actions">
+        <button class="secondary-button" id="add-passkey-button" type="button">Add backup passkey</button>
         <button class="secondary-button" id="edit-button" type="button">Edit directory</button>
         <button class="secondary-button" id="sign-out-button" type="button">Sign out</button>
       </div>

@@ -10,10 +10,21 @@
     const MAX_COMPRESSED_PHOTO_SIZE = 200 * 1024;
     const PHOTO_BUCKET = "pursue-people";
     const ALLOWED_PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"];
-    const SESSION_STORAGE_KEY = "pursue_directory_session_v3";
-    const LOCAL_DEVICE_KEY = "pursue_directory_remembered_v4";
     const CACHED_DATA_KEY = "pursue_directory_cached_data_v2";
     const THEME_STORAGE_KEY = "pursue_directory_theme";
+    function clearPersistedDirectoryData() {
+      for (const getStorage of [() => window.sessionStorage, () => window.localStorage]) {
+        try {
+          const storage = getStorage();
+          storage.removeItem("pursue_directory_session_v3");
+          storage.removeItem("pursue_directory_remembered_v4");
+          storage.removeItem(CACHED_DATA_KEY);
+        } catch (error) {
+          console.warn("Could not clear previously stored directory data:", error);
+        }
+      }
+    }
+    clearPersistedDirectoryData();
 
     // Theme Management
     const themeToggleBtn = document.querySelector("#theme-toggle-btn");
@@ -135,9 +146,9 @@
     const authPanel = document.querySelector("#auth-panel");
     const signInForm = document.querySelector("#sign-in-form");
     const signInButton = document.querySelector("#sign-in-button");
-    const rememberDeviceCheckbox = document.querySelector("#remember-device-checkbox");
     const passkeyEnrollmentPanel = document.querySelector("#passkey-enrollment-panel");
     const registerPasskeyButton = document.querySelector("#register-passkey-button");
+    const addPasskeyButton = document.querySelector("#add-passkey-button");
     const inviteMemberForm = document.querySelector("#invite-member-form");
     const inviteMemberButton = document.querySelector("#invite-member-button");
     const inviteMemberStatus = document.querySelector("#invite-member-status");
@@ -248,106 +259,8 @@
       ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
       : null;
 
-    // Offline Directory Cache Helpers
-    function saveDirectoryCache(people, teams) {
-      try {
-        localStorage.setItem(
-          CACHED_DATA_KEY,
-          JSON.stringify({
-            people: Array.isArray(people) ? people : [],
-            teams: Array.isArray(teams) ? teams : [],
-            cachedAt: new Date().toISOString(),
-          })
-        );
-      } catch (e) {
-        console.warn("Could not save directory cache to localStorage:", e);
-      }
-    }
-
-    function getCachedDirectory() {
-      try {
-        const raw = localStorage.getItem(CACHED_DATA_KEY);
-        if (raw) return JSON.parse(raw);
-      } catch (e) {}
-      return null;
-    }
-
-    // Session Management & Device Persistence
-    async function saveSession(email, password, sessionToken, editorPassword) {
-      // 1. Save in sessionStorage (current browser session / tab)
-      const sessionData = JSON.stringify({
-        email,
-        password,
-        sessionToken,
-        editorPassword: editorPassword || "",
-      });
-      try { sessionStorage.setItem(SESSION_STORAGE_KEY, sessionData); } catch (e) {}
-
-      // 2. If user checked "Remember sign-in on this device", persist securely in localStorage
-      if (rememberDeviceCheckbox.checked) {
-        try {
-          localStorage.setItem(LOCAL_DEVICE_KEY, JSON.stringify({
-            email,
-            password,
-            sessionToken,
-            editorPassword: editorPassword || "",
-            savedAt: new Date().toISOString(),
-            _v: 4,
-          }));
-        } catch (e) {}
-      } else {
-        try { localStorage.removeItem(LOCAL_DEVICE_KEY); } catch (e) {}
-      }
-    }
-
-    function getStoredSession() {
-      // Prefer sessionStorage (active tab session)
-      try {
-        const sessionRaw = sessionStorage.getItem(SESSION_STORAGE_KEY);
-        if (sessionRaw) {
-          const parsed = JSON.parse(sessionRaw);
-          if (parsed && typeof parsed.email === "string"
-            && typeof parsed.password === "string"
-            && typeof parsed.sessionToken === "string") {
-            return { ...parsed, _source: "session" };
-          }
-        }
-      } catch (e) {}
-
-      // Fall back to localStorage if device was remembered
-      try {
-        const deviceRaw = localStorage.getItem(LOCAL_DEVICE_KEY);
-        if (deviceRaw) {
-          const parsed = JSON.parse(deviceRaw);
-          if (parsed && typeof parsed.email === "string"
-            && typeof parsed.password === "string"
-            && typeof parsed.sessionToken === "string") {
-            return { ...parsed, _source: "local" };
-          }
-        }
-      } catch (e) {}
-
-      return null;
-    }
-
     function clearSession() {
-      try {
-        sessionStorage.removeItem(SESSION_STORAGE_KEY);
-        localStorage.removeItem(LOCAL_DEVICE_KEY);
-        localStorage.removeItem(CACHED_DATA_KEY);
-      } catch (e) {}
-    }
-
-    function isDeviceRemembered() {
-      try {
-        const raw = localStorage.getItem(LOCAL_DEVICE_KEY);
-        if (!raw) return false;
-        const parsed = JSON.parse(raw);
-        return Boolean(parsed
-          && typeof parsed.email === "string"
-          && typeof parsed.password === "string"
-          && typeof parsed.sessionToken === "string");
-      } catch (e) { return false; }
+      clearPersistedDirectoryData();
     }
 
     function updateRoleVisibility() {
@@ -1680,7 +1593,7 @@
     }
 
     async function loadPeople() {
-      // If we already have members rendered (e.g. from offline cache), keep showing them without flickering
+      // Avoid clearing the current roster while a refresh is in progress.
       skeletonContainer.hidden = allPeople.length > 0;
       if (allPeople.length === 0) {
         emptyState.hidden = true;
@@ -1692,28 +1605,11 @@
         if (Array.isArray(teams) && teams.length > 0) {
           directoryTeams = teams;
         }
-        // Save to offline cache
-        saveDirectoryCache(allPeople, directoryTeams);
-
         renderTeamCheckboxes();
         renderTeamFilterOptions();
         filterAndRenderPeople();
       } catch (err) {
-        console.warn("Server list request failed; attempting offline cache:", err);
-        const cached = getCachedDirectory();
-        if (cached && Array.isArray(cached.people) && cached.people.length > 0) {
-          allPeople = cached.people;
-          if (Array.isArray(cached.teams) && cached.teams.length > 0) {
-            directoryTeams = cached.teams;
-          }
-          renderTeamCheckboxes();
-          renderTeamFilterOptions();
-          filterAndRenderPeople();
-          const cachedDate = cached.cachedAt ? new Date(cached.cachedAt).toLocaleDateString() : "earlier";
-          showToast(`Offline mode: Showing saved roster from ${cachedDate}.`, "info");
-        } else {
-          showToast(`Failed to load directory: ${err.message}`, "error");
-        }
+        showToast(`Failed to load directory: ${err.message}`, "error");
       } finally {
         skeletonContainer.hidden = true;
       }
@@ -1858,33 +1754,34 @@
     }
 
     // Auth & Form Handlers
-    async function registerPasskey() {
+    async function registerPasskey(isAdditional = false) {
       if (!window.SimpleWebAuthnBrowser
         || typeof window.SimpleWebAuthnBrowser.startRegistration !== "function") {
         throw new Error("Passkeys are not supported by this browser.");
       }
-      if (!pendingInvitationToken) {
+      if (!isAdditional && !pendingInvitationToken) {
         throw new Error("Open a valid one-time invitation link to register a passkey.");
       }
 
       const { options, challenge_id: challengeId } = await callDirectory("passkey-registration-options", {
-        password: "",
-        sessionToken: "",
-        fields: { invitation_token: pendingInvitationToken },
+        password: isAdditional ? activePassword : "",
+        sessionToken: isAdditional ? activeSessionToken : "",
+        fields: isAdditional ? {} : { invitation_token: pendingInvitationToken },
       });
       const credential = await window.SimpleWebAuthnBrowser.startRegistration({ optionsJSON: options });
       await callDirectory("passkey-registration-verify", {
-        password: "",
-        sessionToken: "",
+        password: isAdditional ? activePassword : "",
+        sessionToken: isAdditional ? activeSessionToken : "",
         fields: {
-          invitation_token: pendingInvitationToken,
+          ...(isAdditional ? {} : { invitation_token: pendingInvitationToken }),
           challenge_id: challengeId,
           credential,
         },
       });
-      passkeyEnrollmentPanel.hidden = true;
-      pendingInvitationToken = "";
-      showToast("Passkey registered. You can now sign in with your email and directory password.", "success");
+      if (!isAdditional) {
+        passkeyEnrollmentPanel.hidden = true;
+        pendingInvitationToken = "";
+      }
     }
 
     registerPasskeyButton.addEventListener("click", async () => {
@@ -1895,6 +1792,18 @@
         showToast(`Passkey setup failed: ${err.message}`, "error");
       } finally {
         registerPasskeyButton.disabled = false;
+      }
+    });
+
+    addPasskeyButton.addEventListener("click", async () => {
+      addPasskeyButton.disabled = true;
+      try {
+        await registerPasskey(true);
+        showToast("Backup passkey added. Your existing passkeys are unchanged.", "success");
+      } catch (err) {
+        showToast(`Could not add passkey: ${err.message}`, "error");
+      } finally {
+        addPasskeyButton.disabled = false;
       }
     });
 
@@ -2062,13 +1971,11 @@
             email,
             challenge_id: challengeId,
             credential,
-            remember: rememberDeviceCheckbox.checked,
           },
         });
         activeEmail = email;
         activePassword = password;
         activeSessionToken = sessionToken;
-        await saveSession(activeEmail, activePassword, activeSessionToken, "");
         signInForm.reset();
         await loadPeople();
         setSignedInState(true);
@@ -2139,7 +2046,6 @@
         await callDirectory("verify-editor", { editorPassword });
         activeEditorPassword = editorPassword;
         editUnlocked = true;
-        await saveSession(activeEmail, activePassword, activeSessionToken, activeEditorPassword);
         editPasswordForm.reset();
         setSignedInState(Boolean(activePassword));
         showToast("Editor mode unlocked!", "success");
@@ -2244,8 +2150,8 @@
 
     cancelPersonEditButton.addEventListener("click", resetPersonForm);
 
-    // Initial session recovery & offline-first startup
-    (async function restoreSession() {
+    // Invitation links are single-use; authenticated users can add passkeys without replacing existing ones.
+    (function initializePasskeyEnrollment() {
       const invitationParams = new URLSearchParams(window.location.hash.slice(1));
       const invitationToken = invitationParams.get("invite");
       if (invitationToken) {
@@ -2253,65 +2159,6 @@
         passkeyEnrollmentPanel.hidden = false;
         clearSession();
         window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
-      }
-
-      // Pre-populate "Remember me" checkbox if device is remembered
-      if (isDeviceRemembered()) {
-        rememberDeviceCheckbox.checked = true;
-      }
-
-      // Check for cached directory data to render immediately without waiting for network (Stale-While-Revalidate)
-      const cached = getCachedDirectory();
-      if (cached && Array.isArray(cached.people) && cached.people.length > 0) {
-        allPeople = cached.people;
-        if (Array.isArray(cached.teams) && cached.teams.length > 0) {
-          directoryTeams = cached.teams;
-        }
-        renderTeamCheckboxes();
-        renderTeamFilterOptions();
-        filterAndRenderPeople();
-      }
-
-      const session = getStoredSession();
-      if (session && session.password && session.email && session.sessionToken) {
-        try {
-          await callDirectory("check-session", {
-            password: session.password,
-            sessionToken: session.sessionToken,
-            fields: { email: session.email },
-          });
-          activeEmail = session.email;
-          activePassword = session.password;
-          activeSessionToken = session.sessionToken;
-          if (session.editorPassword) {
-            try {
-              await callDirectory("verify-editor", { editorPassword: session.editorPassword });
-              activeEditorPassword = session.editorPassword;
-              editUnlocked = true;
-            } catch (e) {
-              activeEditorPassword = "";
-              editUnlocked = false;
-            }
-          }
-          await loadPeople();
-          setSignedInState(true);
-        } catch (err) {
-          // Only activate the offline view when the browser is actually offline.
-          if (!navigator.onLine) {
-            activeEmail = session.email;
-            activePassword = session.password;
-            activeSessionToken = session.sessionToken;
-            if (session.editorPassword) activeEditorPassword = session.editorPassword;
-            setSignedInState(true);
-            showToast("Offline mode: Using cached directory roster.", "info");
-          } else {
-            activeEmail = "";
-            activePassword = "";
-            activeSessionToken = "";
-            clearSession();
-            setSignedInState(false);
-          }
-        }
       }
     })();
 

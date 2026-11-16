@@ -170,7 +170,7 @@ async function storePasskeyChallenge(
 async function consumePasskeyChallenge(
   id: unknown,
   challengeType: "registration" | "authentication",
-  details: { userId?: string; email?: string; invitationId?: string },
+  details: { userId?: string; email?: string; invitationId?: string | null },
 ) {
   if (typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id)) return null;
   let query = supabase
@@ -180,7 +180,11 @@ async function consumePasskeyChallenge(
     .eq("challenge_type", challengeType)
     .gt("expires_at", new Date().toISOString());
   if (details.userId) query = query.eq("user_id", details.userId);
-  if (details.invitationId) query = query.eq("invitation_id", details.invitationId);
+  if (details.invitationId !== undefined) {
+    query = details.invitationId
+      ? query.eq("invitation_id", details.invitationId)
+      : query.is("invitation_id", null);
+  }
   if (details.email) query = query.eq("email", details.email);
   const { data, error } = await query.select("challenge, user_id, invitation_id, email").maybeSingle();
   if (error) throw error;
@@ -537,7 +541,6 @@ Deno.serve(async (request) => {
 
       const sessionToken = encodeBase64Url(crypto.getRandomValues(new Uint8Array(32)));
       const tokenHash = await sha256Hex(sessionToken);
-      const sessionDuration = getValue("remember") === true ? 30 : 1;
       const { error: expiredSessionError } = await supabase
         .from("directory_sessions")
         .delete()
@@ -546,30 +549,59 @@ Deno.serve(async (request) => {
       const { error: sessionError } = await supabase.from("directory_sessions").insert({
         token_hash: tokenHash,
         user_id: account.user_id,
-        expires_at: new Date(Date.now() + sessionDuration * 24 * 60 * 60 * 1000).toISOString(),
+        expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
       });
       if (sessionError) throw sessionError;
       return jsonResponse({ session_token: sessionToken }, 200, requestOrigin);
     }
 
     if (action === "passkey-registration-options" || action === "passkey-registration-verify") {
-      const invitation = await getValidInvitation(getValue("invitation_token"));
-      if (!invitation) {
-        return jsonResponse({ error: "This invitation link is invalid, expired, or already used." }, 401, requestOrigin);
+      const invitationToken = getValue("invitation_token");
+      let registrationAccount: { user_id: string; email: string; invitationId?: string } | null = null;
+      if (typeof invitationToken === "string") {
+        registrationAccount = await getValidInvitation(invitationToken);
+        if (!registrationAccount) {
+          return jsonResponse({ error: "This invitation link is invalid, expired, or already used." }, 401, requestOrigin);
+        }
+      } else {
+        const activeSession = await getActiveDirectorySession(getValue("session_token"));
+        if (!activeSession) {
+          return jsonResponse({ error: "Sign in before adding another passkey." }, 401, requestOrigin);
+        }
+        if (typeof password !== "string" || password.length < 1 || password.length > 256) {
+          return jsonResponse({ error: "Enter the directory password to add another passkey." }, 400, requestOrigin);
+        }
+        const { data: passwordValid, error: passwordError } = await supabase.rpc(
+          "verify_directory_password",
+          { p_password: password, p_ip_hash: await hashIp(getClientIp(request)) },
+        );
+        if (passwordError) {
+          if (passwordError.message.includes("too many password attempts")) {
+            return jsonResponse({ error: "Too many incorrect password attempts. Try again in 15 minutes." }, 429, requestOrigin);
+          }
+          throw passwordError;
+        }
+        if (!passwordValid) {
+          return jsonResponse({ error: "The directory password is incorrect." }, 401, requestOrigin);
+        }
+        registrationAccount = {
+          user_id: activeSession.user_id,
+          email: activeSession.email,
+        };
       }
       const { origin, rpID } = getWebAuthnContext(requestOrigin);
       if (action === "passkey-registration-options") {
         const { data: existingPasskeys, error: existingError } = await supabase
           .from("directory_passkeys")
           .select("credential_id, transports")
-          .eq("user_id", invitation.user_id);
+          .eq("user_id", registrationAccount.user_id);
         if (existingError) throw existingError;
         const options = await generateRegistrationOptions({
           rpName: RP_NAME,
           rpID,
-          userID: new TextEncoder().encode(invitation.user_id),
-          userName: invitation.email,
-          userDisplayName: invitation.email,
+          userID: new TextEncoder().encode(registrationAccount.user_id),
+          userName: registrationAccount.email,
+          userDisplayName: registrationAccount.email,
           attestationType: "none",
           authenticatorSelection: {
             residentKey: "required",
@@ -581,8 +613,8 @@ Deno.serve(async (request) => {
           })),
         });
         const challengeId = await storePasskeyChallenge(options.challenge, "registration", {
-          userId: invitation.user_id,
-          invitationId: invitation.invitationId,
+          userId: registrationAccount.user_id,
+          invitationId: registrationAccount.invitationId,
         });
         return jsonResponse({ options, challenge_id: challengeId }, 200, requestOrigin);
       }
@@ -593,8 +625,8 @@ Deno.serve(async (request) => {
         return jsonResponse({ error: "The passkey registration response is invalid." }, 400, requestOrigin);
       }
       const challenge = await consumePasskeyChallenge(challengeId, "registration", {
-        userId: invitation.user_id,
-        invitationId: invitation.invitationId,
+        userId: registrationAccount.user_id,
+        invitationId: registrationAccount.invitationId || null,
       });
       if (!challenge || typeof challenge.challenge !== "string") {
         return jsonResponse({ error: "This passkey request expired. Please try again." }, 401, requestOrigin);
@@ -617,28 +649,38 @@ Deno.serve(async (request) => {
         return jsonResponse({ error: "The passkey could not be verified. Please try again." }, 400, requestOrigin);
       }
 
-      const { data: usedInvitation, error: invitationError } = await supabase
-        .from("directory_invitations")
-        .update({ used_at: new Date().toISOString() })
-        .eq("id", invitation.invitationId)
-        .is("used_at", null)
-        .gt("expires_at", new Date().toISOString())
-        .select("id")
-        .maybeSingle();
-      if (invitationError) throw invitationError;
-      if (!usedInvitation) {
-        return jsonResponse({ error: "This invitation link is invalid, expired, or already used." }, 401, requestOrigin);
-      }
-
       const credential = verification.registrationInfo.credential;
       const { error: insertError } = await supabase.from("directory_passkeys").insert({
         credential_id: credential.id,
-        user_id: invitation.user_id,
+        user_id: registrationAccount.user_id,
         public_key: encodeBase64Url(credential.publicKey),
         counter: credential.counter,
         transports: credential.transports || [],
       });
+      if (insertError?.code === "23505") {
+        return jsonResponse({ error: "This passkey is already registered. Try a different passkey." }, 409, requestOrigin);
+      }
       if (insertError) throw insertError;
+      if (registrationAccount.invitationId) {
+        const { data: usedInvitation, error: invitationError } = await supabase
+          .from("directory_invitations")
+          .update({ used_at: new Date().toISOString() })
+          .eq("id", registrationAccount.invitationId)
+          .is("used_at", null)
+          .gt("expires_at", new Date().toISOString())
+          .select("id")
+          .maybeSingle();
+        if (invitationError || !usedInvitation) {
+          const { error: cleanupError } = await supabase
+            .from("directory_passkeys")
+            .delete()
+            .eq("credential_id", credential.id)
+            .eq("user_id", registrationAccount.user_id);
+          if (cleanupError) throw cleanupError;
+          if (invitationError) throw invitationError;
+          return jsonResponse({ error: "This invitation link is invalid, expired, or already used." }, 401, requestOrigin);
+        }
+      }
       return jsonResponse({ ok: true }, 200, requestOrigin);
     }
 
