@@ -420,7 +420,7 @@ values (
   'pursue-people',
   'pursue-people',
   false,
-  20971520,
+  204800,
   array['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif']
 )
 on conflict (id) do update

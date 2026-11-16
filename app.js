@@ -436,7 +436,7 @@
         if (file.size < MAX_COMPRESSED_PHOTO_SIZE) {
           return { file, originalSize: file.size, compressedSize: file.size, savedPercent: 0 };
         }
-        throw new Error("Animated GIFs larger than 200 KB can't be compressed without losing animation. Choose a still image.");
+        throw new Error("Animated GIFs 200 KB or larger can't be compressed without losing animation. Choose a still image.");
       }
 
       if (file.size < MAX_COMPRESSED_PHOTO_SIZE) {
